@@ -1,11 +1,11 @@
 import cv2
 import numpy as np
-from tkinter import Tk, filedialog, Button, Canvas, Frame, Label
+from tkinter import Tk, filedialog, Button, Canvas, Frame, Label, Entry, StringVar
 from tkinter import ttk
 from PIL import Image, ImageTk
 from simple_lama_inpainting import SimpleLama
-import torch
 import threading
+from rapidocr_onnxruntime import RapidOCR
 
 class WatermarkRemover:
     def __init__(self, root):
@@ -30,6 +30,8 @@ class WatermarkRemover:
         self.pan_start_x = 0
         self.pan_start_y = 0
         self.simple_lama = None
+        self.ocr_reader = None
+        self.mode = "box"
         
         self._setup_ui()
         
@@ -41,6 +43,24 @@ class WatermarkRemover:
         Button(btn_frame, text="Remove", command=self._remove_watermark, width=10).pack(side="left", padx=5)
         Button(btn_frame, text="Save", command=self._save_image, width=10).pack(side="left", padx=5)
         Button(btn_frame, text="Reset", command=self._reset_image, width=10).pack(side="left", padx=5)
+        
+        mode_frame = Frame(self.root)
+        mode_frame.pack(pady=5)
+        
+        self.mode_var = StringVar(value="box")
+        Label(mode_frame, text="Mode:").pack(side="left", padx=5)
+        
+        ttk.Radiobutton(mode_frame, text="Box Select", variable=self.mode_var, 
+                        value="box", command=self._switch_mode).pack(side="left", padx=5)
+        ttk.Radiobutton(mode_frame, text="Text", variable=self.mode_var, 
+                        value="text", command=self._switch_mode).pack(side="left", padx=5)
+        
+        self.text_frame = Frame(self.root)
+        Label(self.text_frame, text="Watermark Text:").pack(side="left", padx=5)
+        self.text_entry = Entry(self.text_frame, width=40)
+        self.text_entry.pack(side="left", padx=5)
+        self.text_frame.pack(pady=5)
+        self.text_frame.pack_forget()
         
         self.canvas = Canvas(self.root, width=self.canvas_w, height=self.canvas_h, bg="gray")
         self.canvas.pack(padx=10, pady=10)
@@ -72,6 +92,20 @@ class WatermarkRemover:
         self.progress_bar.pack(fill="x")
         self.progress_bar.pack_forget()
         
+    def _switch_mode(self):
+        self.mode = self.mode_var.get()
+        self.roi_selected = False
+        
+        if self.mode == "text":
+            self.text_frame.pack(pady=5)
+            self._update_status("Text mode: Enter watermark text and click [Remove]")
+        else:
+            self.text_frame.pack_forget()
+            self._update_status("Box mode: Drag to select watermark area")
+        
+        if self.image is not None:
+            self._refresh_display("")
+            
     def _open_image(self):
         filepath = filedialog.askopenfilename(
             filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.webp")]
@@ -85,7 +119,7 @@ class WatermarkRemover:
                     self.original_image = self.image.copy()
                     self.roi_selected = False
                     self.zoom_scale = 1.0
-                    self._update_display("Image loaded. Drag to select watermark area.")
+                    self._update_display("Image loaded. " + ("Enter watermark text." if self.mode == "text" else "Drag to select watermark area."))
                 else:
                     self._update_status("Failed to decode image!")
             except Exception as e:
@@ -95,18 +129,36 @@ class WatermarkRemover:
         if self.image is None:
             self._update_status("Please open an image first!")
             return
-        if not self.roi_selected:
-            self._update_status("Please select watermark area first!")
-            return
-        
+            
+        if self.mode == "box":
+            if not self.roi_selected:
+                self._update_status("Please select watermark area first!")
+                return
+            self._start_box_removal()
+        else:
+            watermark_text = self.text_entry.get().strip()
+            if not watermark_text:
+                self._update_status("Please enter watermark text!")
+                return
+            self._start_text_removal(watermark_text)
+    
+    def _start_box_removal(self):
         self.progress_bar.pack(fill="x")
         self.progress_bar.start(10)
         self._update_status("Processing with LaMa AI model...")
         self.root.update()
         
-        threading.Thread(target=self._process_in_background, daemon=True).start()
+        threading.Thread(target=self._process_box_in_background, daemon=True).start()
     
-    def _process_in_background(self):
+    def _start_text_removal(self, watermark_text):
+        self.progress_bar.pack(fill="x")
+        self.progress_bar.start(10)
+        self._update_status("Initializing OCR and detecting text...")
+        self.root.update()
+        
+        threading.Thread(target=self._process_text_in_background, args=(watermark_text,), daemon=True).start()
+    
+    def _process_box_in_background(self):
         try:
             if self.simple_lama is None:
                 self.root.after(0, lambda: self._update_status("Loading LaMa model (first time will download ~200MB)..."))
@@ -128,6 +180,60 @@ class WatermarkRemover:
             
             mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
             cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+            
+            self._apply_lama_inpaint(mask)
+        except Exception as e:
+            self.root.after(0, lambda: self._handle_error(str(e)))
+    
+    def _process_text_in_background(self, watermark_text):
+        try:
+            if self.ocr_reader is None:
+                self.root.after(0, lambda: self._update_status("Loading OCR model..."))
+                self.ocr_reader = RapidOCR()
+                self.root.after(0, lambda: self._update_status("Detecting text in image..."))
+            
+            image_rgb = cv2.cvtColor(self.image, cv2.COLOR_BGR2RGB)
+            result, elapse = self.ocr_reader(image_rgb)
+            
+            if result is None or len(result) == 0:
+                self.root.after(0, lambda: self._handle_error("No text found in image"))
+                return
+            
+            matched_boxes = []
+            watermark_lower = watermark_text.lower().replace(" ", "").replace("AI", "ai")
+            
+            for detection in result:
+                bbox = detection[0]
+                text = detection[1]
+                confidence = detection[2] if len(detection) > 2 else 1.0
+                
+                text_clean = text.lower().replace(" ", "").replace("AI", "ai")
+                
+                if watermark_lower in text_clean or text_clean in watermark_lower:
+                    matched_boxes.append(bbox)
+                    self.root.after(0, lambda t=text: self._update_status(f"Found matching text: '{t}'"))
+            
+            if not matched_boxes:
+                self.root.after(0, lambda: self._handle_error(f"Text '{watermark_text}' not found in image"))
+                return
+            
+            mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
+            
+            for bbox in matched_boxes:
+                pts = np.array(bbox, dtype=np.int32)
+                cv2.fillPoly(mask, [pts], 255)
+            
+            self.root.after(0, lambda: self._update_status("Processing with LaMa AI model..."))
+            self._apply_lama_inpaint(mask)
+            
+        except Exception as e:
+            self.root.after(0, lambda: self._handle_error(str(e)))
+    
+    def _apply_lama_inpaint(self, mask):
+        try:
+            if self.simple_lama is None:
+                self.root.after(0, lambda: self._update_status("Loading LaMa model..."))
+                self.simple_lama = SimpleLama()
             
             image_rgb = cv2.cvtColor(self.image, cv2.COLOR_BGR2RGB)
             image_pil = Image.fromarray(image_rgb)
@@ -153,31 +259,6 @@ class WatermarkRemover:
         self.progress_bar.stop()
         self.progress_bar.pack_forget()
         self._update_status(f"Error: {error_msg}")
-    
-    def _inpaint_telea_adaptive(self, image, mask):
-        result = image.copy()
-        mask_binary = (mask > 0).astype(np.uint8) * 255
-        
-        contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return result
-        
-        for contour in contours:
-            x, y, w, h = cv2.boundingRect(contour)
-            
-            expand = 5
-            x1 = max(0, x - expand)
-            y1 = max(0, y - expand)
-            x2 = min(image.shape[1], x + w + expand)
-            y2 = min(image.shape[0], y + h + expand)
-            
-            local_mask = mask_binary[y1:y2, x1:x2]
-            local_image = result[y1:y2, x1:x2]
-            
-            local_result = cv2.inpaint(local_image, local_mask, 3, cv2.INPAINT_TELEA)
-            result[y1:y2, x1:x2] = local_result
-        
-        return result
         
     def _save_image(self):
         if self.image is None:
@@ -196,7 +277,7 @@ class WatermarkRemover:
             self.image = self.original_image.copy()
             self.roi_selected = False
             self.zoom_scale = 1.0
-            self._update_display("Image reset. Drag to select watermark area.")
+            self._update_display("Image reset. " + ("Enter watermark text." if self.mode == "text" else "Drag to select watermark area."))
             
     def _update_display(self, message=""):
         if self.image is None:
@@ -242,20 +323,20 @@ class WatermarkRemover:
         self.status_text.config(text=message)
             
     def _on_mouse_down(self, event):
-        if self.image is None:
+        if self.image is None or self.mode != "box":
             return
         self.drawing = True
         self.ix, self.iy = event.x, event.y
         self.fx, self.fy = event.x, event.y
         
     def _on_mouse_move(self, event):
-        if not self.drawing or self.image is None:
+        if not self.drawing or self.image is None or self.mode != "box":
             return
         self.fx, self.fy = event.x, event.y
         self._draw_selection()
         
     def _on_mouse_up(self, event):
-        if not self.drawing or self.image is None:
+        if not self.drawing or self.image is None or self.mode != "box":
             return
         self.drawing = False
         self.fx, self.fy = event.x, event.y
