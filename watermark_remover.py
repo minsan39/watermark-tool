@@ -37,6 +37,7 @@ class WatermarkRemover:
         
         self.image_list = []
         self.original_image_list = []
+        self.image_paths = []
         self.current_image_index = -1
         self.batch_processing = False
         
@@ -51,6 +52,8 @@ class WatermarkRemover:
         self.btn_batch_remove = Button(btn_frame, text="Batch Remove", command=self._batch_remove_watermark, width=12, state="disabled")
         self.btn_batch_remove.pack(side="left", padx=5)
         Button(btn_frame, text="Save", command=self._save_image, width=10).pack(side="left", padx=5)
+        self.btn_batch_save = Button(btn_frame, text="Batch Save", command=self._batch_save_image, width=10, state="disabled")
+        self.btn_batch_save.pack(side="left", padx=5)
         Button(btn_frame, text="Reset", command=self._reset_image, width=10).pack(side="left", padx=5)
         
         nav_frame = Frame(self.root)
@@ -146,11 +149,13 @@ class WatermarkRemover:
             self.btn_prev.config(state="normal" if self.current_image_index > 0 else "disabled")
             self.btn_next.config(state="normal" if self.current_image_index < total - 1 else "disabled")
             self.btn_batch_remove.config(state="normal" if total > 1 else "disabled")
+            self.btn_batch_save.config(state="normal" if total > 1 else "disabled")
         else:
             self.image_counter_label.config(text="0 / 0")
             self.btn_prev.config(state="disabled")
             self.btn_next.config(state="disabled")
             self.btn_batch_remove.config(state="disabled")
+            self.btn_batch_save.config(state="disabled")
     
     def _update_batch_display(self, current_idx, total):
         self._update_nav_buttons()
@@ -315,6 +320,7 @@ class WatermarkRemover:
                     if img is not None:
                         self.image_list.append(img)
                         self.original_image_list.append(img.copy())
+                        self.image_paths.append(filepath)
                         new_count += 1
                     else:
                         failed_files.append(filepath)
@@ -824,24 +830,58 @@ class WatermarkRemover:
             self._update_status("No image to save!")
             return
         
-        if len(self.image_list) > 1:
-            folder = filedialog.askdirectory(title="Select folder to save all images")
-            if folder:
-                saved_count = 0
-                for idx, img in enumerate(self.image_list):
-                    filename = f"processed_{idx + 1}.png"
-                    filepath = f"{folder}/{filename}"
-                    cv2.imwrite(filepath, img)
-                    saved_count += 1
-                self._update_status(f"Saved {saved_count} images to {folder}")
+        if not self.image_paths or self.current_image_index >= len(self.image_paths):
+            self._update_status("No original path found!")
+            return
+        
+        current_path = self.image_paths[self.current_image_index]
+        if current_path:
+            try:
+                ext = current_path.rsplit('.', 1)[-1]
+                if ext.lower() in ['jpg', 'jpeg']:
+                    cv2.imencode('.jpg', self.image)[1].tofile(current_path)
+                elif ext.lower() == 'png':
+                    cv2.imencode('.png', self.image)[1].tofile(current_path)
+                elif ext.lower() == 'webp':
+                    cv2.imencode('.webp', self.image)[1].tofile(current_path)
+                else:
+                    cv2.imencode('.png', self.image)[1].tofile(current_path)
+                self._update_status(f"Saved: {current_path}")
+            except Exception as e:
+                self._update_status(f"Failed to save: {str(e)}")
         else:
-            filepath = filedialog.asksaveasfilename(
-                defaultextension=".png",
-                filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg"), ("All files", "*.*")]
-            )
-            if filepath:
-                cv2.imwrite(filepath, self.image)
-                self._update_status(f"Saved: {filepath}")
+            self._update_status("No original path for this image!")
+    
+    def _batch_save_image(self):
+        if not self.image_list:
+            self._update_status("No images to save!")
+            return
+        
+        saved_count = 0
+        failed_count = 0
+        for idx, img in enumerate(self.image_list):
+            if idx < len(self.image_paths) and self.image_paths[idx]:
+                try:
+                    current_path = self.image_paths[idx]
+                    ext = current_path.rsplit('.', 1)[-1]
+                    if ext.lower() in ['jpg', 'jpeg']:
+                        cv2.imencode('.jpg', img)[1].tofile(current_path)
+                    elif ext.lower() == 'png':
+                        cv2.imencode('.png', img)[1].tofile(current_path)
+                    elif ext.lower() == 'webp':
+                        cv2.imencode('.webp', img)[1].tofile(current_path)
+                    else:
+                        cv2.imencode('.png', img)[1].tofile(current_path)
+                    saved_count += 1
+                except Exception as e:
+                    failed_count += 1
+            else:
+                failed_count += 1
+        
+        if failed_count == 0:
+            self._update_status(f"Batch saved {saved_count} images to original locations")
+        else:
+            self._update_status(f"Saved {saved_count}, failed {failed_count}")
             
     def _reset_image(self):
         if self.original_image_list:
