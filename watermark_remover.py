@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from tkinter import Tk, filedialog, Button, Canvas, Frame, Label, Entry, StringVar
+from tkinter import Tk, filedialog, Button, Canvas, Frame, Label, Entry, StringVar, Toplevel
 from tkinter import ttk
 from PIL import Image, ImageTk
 from simple_lama_inpainting import SimpleLama
@@ -32,6 +32,8 @@ class WatermarkRemover:
         self.simple_lama = None
         self.ocr_reader = None
         self.mode = "box"
+        self.template_image = None
+        self.template_path = None
         
         self._setup_ui()
         
@@ -54,6 +56,8 @@ class WatermarkRemover:
                         value="box", command=self._switch_mode).pack(side="left", padx=5)
         ttk.Radiobutton(mode_frame, text="Text", variable=self.mode_var, 
                         value="text", command=self._switch_mode).pack(side="left", padx=5)
+        ttk.Radiobutton(mode_frame, text="Image", variable=self.mode_var, 
+                        value="image", command=self._switch_mode).pack(side="left", padx=5)
         
         self.text_frame = Frame(self.root)
         Label(self.text_frame, text="Watermark Text:").pack(side="left", padx=5)
@@ -61,6 +65,26 @@ class WatermarkRemover:
         self.text_entry.pack(side="left", padx=5)
         self.text_frame.pack(pady=5)
         self.text_frame.pack_forget()
+        
+        self.image_frame = Frame(self.root)
+        Label(self.image_frame, text="Template:").pack(side="left", padx=5)
+        Button(self.image_frame, text="Load Template", command=self._load_template, width=15).pack(side="left", padx=5)
+        self.template_label = Label(self.image_frame, text="No template loaded", fg="gray")
+        self.template_label.pack(side="left", padx=5)
+        
+        self.threshold_frame = Frame(self.root)
+        Label(self.threshold_frame, text="Threshold:").pack(side="left", padx=5)
+        self.threshold_var = StringVar(value="0.3")
+        self.threshold_scale = ttk.Scale(self.threshold_frame, from_=0.1, to=0.9, variable=self.threshold_var, orient="horizontal", length=150)
+        self.threshold_scale.pack(side="left", padx=5)
+        self.threshold_label = Label(self.threshold_frame, text="0.30", width=5)
+        self.threshold_label.pack(side="left", padx=5)
+        self.threshold_scale.bind("<Motion>", self._update_threshold_label)
+        self.threshold_scale.bind("<ButtonRelease-1>", self._update_threshold_label)
+        self.threshold_frame.pack(pady=5)
+        self.threshold_frame.pack_forget()
+        self.image_frame.pack(pady=5)
+        self.image_frame.pack_forget()
         
         self.canvas = Canvas(self.root, width=self.canvas_w, height=self.canvas_h, bg="gray")
         self.canvas.pack(padx=10, pady=10)
@@ -92,19 +116,131 @@ class WatermarkRemover:
         self.progress_bar.pack(fill="x")
         self.progress_bar.pack_forget()
         
+    def _update_threshold_label(self, event=None):
+        val = float(self.threshold_var.get())
+        self.threshold_label.config(text=f"{val:.2f}")
+        
     def _switch_mode(self):
         self.mode = self.mode_var.get()
         self.roi_selected = False
         
+        self.text_frame.pack_forget()
+        self.image_frame.pack_forget()
+        self.threshold_frame.pack_forget()
+        
         if self.mode == "text":
             self.text_frame.pack(pady=5)
             self._update_status("Text mode: Enter watermark text and click [Remove]")
+        elif self.mode == "image":
+            self.image_frame.pack(pady=5)
+            self.threshold_frame.pack(pady=5)
+            if self.template_image is not None:
+                self._update_status("Image mode: Click [Remove] to find and remove watermark")
+            else:
+                self._update_status("Image mode: Load a template image first")
         else:
-            self.text_frame.pack_forget()
             self._update_status("Box mode: Drag to select watermark area")
         
         if self.image is not None:
             self._refresh_display("")
+            
+    def _load_template(self):
+        filepath = filedialog.askopenfilename(
+            filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.webp")]
+        )
+        if filepath:
+            try:
+                with open(filepath, 'rb') as f:
+                    img_array = np.frombuffer(f.read(), dtype=np.uint8)
+                full_template = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                if full_template is not None:
+                    self._show_template_crop_window(full_template)
+                else:
+                    self._update_status("Failed to decode template image!")
+            except Exception as e:
+                self._update_status(f"Error: {str(e)}")
+    
+    def _show_template_crop_window(self, full_template):
+        crop_window = Toplevel(self.root)
+        crop_window.title("Select Watermark Region")
+        
+        h, w = full_template.shape[:2]
+        max_w, max_h = 800, 600
+        scale = min(max_w / w, max_h / h, 1.0)
+        display_w = int(w * scale)
+        display_h = int(h * scale)
+        
+        crop_window.geometry(f"{display_w + 20}x{display_h + 100}")
+        
+        Label(crop_window, text="Drag to select the watermark area, then click Confirm").pack(pady=5)
+        
+        crop_canvas = Canvas(crop_window, width=display_w, height=display_h, bg="gray")
+        crop_canvas.pack(padx=10, pady=5)
+        
+        display_template = cv2.resize(full_template, (display_w, display_h))
+        display_template = cv2.cvtColor(display_template, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(display_template)
+        tk_img = ImageTk.PhotoImage(pil_img)
+        
+        crop_canvas.create_image(0, 0, anchor="nw", image=tk_img)
+        
+        crop_data = {"start": None, "end": None, "drawing": False}
+        
+        def on_crop_down(event):
+            crop_data["drawing"] = True
+            crop_data["start"] = (event.x, event.y)
+            crop_data["end"] = (event.x, event.y)
+        
+        def on_crop_move(event):
+            if not crop_data["drawing"]:
+                return
+            crop_data["end"] = (event.x, event.y)
+            crop_canvas.delete("crop")
+            crop_canvas.create_rectangle(
+                crop_data["start"][0], crop_data["start"][1],
+                crop_data["end"][0], crop_data["end"][1],
+                outline="red", width=2, tags="crop"
+            )
+        
+        def on_crop_up(event):
+            crop_data["drawing"] = False
+            crop_data["end"] = (event.x, event.y)
+        
+        crop_canvas.bind("<ButtonPress-1>", on_crop_down)
+        crop_canvas.bind("<B1-Motion>", on_crop_move)
+        crop_canvas.bind("<ButtonRelease-1>", on_crop_up)
+        
+        def confirm_crop():
+            if crop_data["start"] and crop_data["end"]:
+                x1 = int(min(crop_data["start"][0], crop_data["end"][0]) / scale)
+                y1 = int(min(crop_data["start"][1], crop_data["end"][1]) / scale)
+                x2 = int(max(crop_data["start"][0], crop_data["end"][0]) / scale)
+                y2 = int(max(crop_data["start"][1], crop_data["end"][1]) / scale)
+                
+                x1 = max(0, x1)
+                y1 = max(0, y1)
+                x2 = min(w, x2)
+                y2 = min(h, y2)
+                
+                if x2 > x1 and y2 > y1:
+                    self.template_image = full_template[y1:y2, x1:x2]
+                    th, tw = self.template_image.shape[:2]
+                    self.template_label.config(text=f"{tw}x{th} cropped", fg="green")
+                    self._update_status("Template cropped. Click [Remove] to find and remove watermark.")
+                    crop_window.destroy()
+                else:
+                    self._update_status("Invalid selection!")
+            else:
+                self._update_status("Please select a region first!")
+        
+        btn_frame = Frame(crop_window)
+        btn_frame.pack(pady=10)
+        Button(btn_frame, text="Confirm", command=confirm_crop, width=10).pack(side="left", padx=5)
+        Button(btn_frame, text="Cancel", command=crop_window.destroy, width=10).pack(side="left", padx=5)
+        
+        crop_window.transient(self.root)
+        crop_window.grab_set()
+        self.root.wait_window(crop_window)
             
     def _open_image(self):
         filepath = filedialog.askopenfilename(
@@ -119,7 +255,14 @@ class WatermarkRemover:
                     self.original_image = self.image.copy()
                     self.roi_selected = False
                     self.zoom_scale = 1.0
-                    self._update_display("Image loaded. " + ("Enter watermark text." if self.mode == "text" else "Drag to select watermark area."))
+                    msg = "Image loaded. "
+                    if self.mode == "text":
+                        msg += "Enter watermark text."
+                    elif self.mode == "image":
+                        msg += "Load template and click Remove." if self.template_image is None else "Click Remove to find watermark."
+                    else:
+                        msg += "Drag to select watermark area."
+                    self._update_display(msg)
                 else:
                     self._update_status("Failed to decode image!")
             except Exception as e:
@@ -135,12 +278,17 @@ class WatermarkRemover:
                 self._update_status("Please select watermark area first!")
                 return
             self._start_box_removal()
-        else:
+        elif self.mode == "text":
             watermark_text = self.text_entry.get().strip()
             if not watermark_text:
                 self._update_status("Please enter watermark text!")
                 return
             self._start_text_removal(watermark_text)
+        else:
+            if self.template_image is None:
+                self._update_status("Please load a template image first!")
+                return
+            self._start_image_removal()
     
     def _start_box_removal(self):
         self.progress_bar.pack(fill="x")
@@ -157,6 +305,14 @@ class WatermarkRemover:
         self.root.update()
         
         threading.Thread(target=self._process_text_in_background, args=(watermark_text,), daemon=True).start()
+    
+    def _start_image_removal(self):
+        self.progress_bar.pack(fill="x")
+        self.progress_bar.start(10)
+        self._update_status("Searching for watermark pattern...")
+        self.root.update()
+        
+        threading.Thread(target=self._process_image_in_background, daemon=True).start()
     
     def _process_box_in_background(self):
         try:
@@ -229,6 +385,98 @@ class WatermarkRemover:
         except Exception as e:
             self.root.after(0, lambda: self._handle_error(str(e)))
     
+    def _process_image_in_background(self):
+        try:
+            self.root.after(0, lambda: self._update_status("Performing multi-scale template matching..."))
+            
+            template = self.template_image
+            img = self.image
+            
+            template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+            img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            
+            template_edges = cv2.Canny(template_gray, 50, 150)
+            img_edges = cv2.Canny(img_gray, 50, 150)
+            
+            th, tw = template_gray.shape[:2]
+            
+            try:
+                threshold = float(self.threshold_var.get())
+            except:
+                threshold = 0.3
+            
+            def compute_gradient_direction(img):
+                gx = cv2.Sobel(img, cv2.CV_32F, 1, 0, ksize=3)
+                gy = cv2.Sobel(img, cv2.CV_32F, 0, 1, ksize=3)
+                angle = cv2.phase(gx, gy, angleInDegrees=True)
+                return angle
+            
+            template_grad = compute_gradient_direction(template_gray)
+            img_grad = compute_gradient_direction(img_gray)
+            
+            scales = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.5, 1.8, 2.0, 2.5, 3.0]
+            
+            matched_regions = []
+            best_score = 0.0
+            
+            for scale in scales:
+                scaled_template = cv2.resize(template_gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
+                scaled_edges = cv2.resize(template_edges, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
+                scaled_grad = cv2.resize(template_grad, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
+                sth, stw = scaled_template.shape[:2]
+                
+                if sth >= img_gray.shape[0] or stw >= img_gray.shape[1]:
+                    continue
+                
+                result_gray = cv2.matchTemplate(img_gray, scaled_template, cv2.TM_CCOEFF_NORMED)
+                result_edges = cv2.matchTemplate(img_edges, scaled_edges, cv2.TM_CCOEFF_NORMED)
+                result_grad = cv2.matchTemplate(img_grad, scaled_grad, cv2.TM_CCOEFF_NORMED)
+                
+                result_combined = np.maximum(result_gray, np.maximum(result_edges, result_grad))
+                
+                max_val = np.max(result_combined)
+                if max_val > best_score:
+                    best_score = max_val
+                
+                loc = np.where(result_combined >= threshold)
+                
+                for pt in zip(*loc[::-1]):
+                    score = result_combined[pt[1], pt[0]]
+                    matched_regions.append((pt[0], pt[1], pt[0] + stw, pt[1] + sth, score))
+            
+            if not matched_regions:
+                msg = f"Best match score: {best_score:.2f}. Threshold: {threshold:.2f}. Try lowering threshold."
+                self.root.after(0, lambda: self._handle_error(msg))
+                return
+            
+            def overlap(r1, r2):
+                return not (r1[2] <= r2[0] or r1[0] >= r2[2] or r1[3] <= r2[1] or r1[1] >= r2[3])
+            
+            matched_regions.sort(key=lambda x: x[4], reverse=True)
+            filtered_regions = []
+            for region in matched_regions:
+                is_dup = False
+                for fr in filtered_regions:
+                    if overlap(region, fr):
+                        is_dup = True
+                        break
+                if not is_dup:
+                    filtered_regions.append(region)
+            
+            self.root.after(0, lambda: self._update_status(f"Found {len(filtered_regions)} watermark region(s)"))
+            
+            mask = np.zeros(img.shape[:2], dtype=np.uint8)
+            
+            for region in filtered_regions:
+                x1, y1, x2, y2 = region[:4]
+                cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+            
+            self.root.after(0, lambda: self._update_status("Processing with LaMa AI model..."))
+            self._apply_lama_inpaint(mask)
+            
+        except Exception as e:
+            self.root.after(0, lambda: self._handle_error(str(e)))
+    
     def _apply_lama_inpaint(self, mask):
         try:
             if self.simple_lama is None:
@@ -277,7 +525,14 @@ class WatermarkRemover:
             self.image = self.original_image.copy()
             self.roi_selected = False
             self.zoom_scale = 1.0
-            self._update_display("Image reset. " + ("Enter watermark text." if self.mode == "text" else "Drag to select watermark area."))
+            msg = "Image reset. "
+            if self.mode == "text":
+                msg += "Enter watermark text."
+            elif self.mode == "image":
+                msg += "Load template and click Remove." if self.template_image is None else "Click Remove to find watermark."
+            else:
+                msg += "Drag to select watermark area."
+            self._update_display(msg)
             
     def _update_display(self, message=""):
         if self.image is None:
