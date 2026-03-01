@@ -35,6 +35,11 @@ class WatermarkRemover:
         self.template_image = None
         self.template_path = None
         
+        self.image_list = []
+        self.original_image_list = []
+        self.current_image_index = -1
+        self.batch_processing = False
+        
         self._setup_ui()
         
     def _setup_ui(self):
@@ -43,8 +48,22 @@ class WatermarkRemover:
         
         Button(btn_frame, text="Open", command=self._open_image, width=10).pack(side="left", padx=5)
         Button(btn_frame, text="Remove", command=self._remove_watermark, width=10).pack(side="left", padx=5)
+        self.btn_batch_remove = Button(btn_frame, text="Batch Remove", command=self._batch_remove_watermark, width=12, state="disabled")
+        self.btn_batch_remove.pack(side="left", padx=5)
         Button(btn_frame, text="Save", command=self._save_image, width=10).pack(side="left", padx=5)
         Button(btn_frame, text="Reset", command=self._reset_image, width=10).pack(side="left", padx=5)
+        
+        nav_frame = Frame(self.root)
+        nav_frame.pack(pady=5)
+        
+        self.btn_prev = Button(nav_frame, text="◀ Prev", command=self._prev_image, width=10, state="disabled")
+        self.btn_prev.pack(side="left", padx=5)
+        
+        self.image_counter_label = Label(nav_frame, text="0 / 0", width=10)
+        self.image_counter_label.pack(side="left", padx=5)
+        
+        self.btn_next = Button(nav_frame, text="Next ▶", command=self._next_image, width=10, state="disabled")
+        self.btn_next.pack(side="left", padx=5)
         
         mode_frame = Frame(self.root)
         mode_frame.pack(pady=5)
@@ -119,6 +138,43 @@ class WatermarkRemover:
     def _update_threshold_label(self, event=None):
         val = float(self.threshold_var.get())
         self.threshold_label.config(text=f"{val:.2f}")
+    
+    def _update_nav_buttons(self):
+        total = len(self.image_list)
+        if total > 0:
+            self.image_counter_label.config(text=f"{self.current_image_index + 1} / {total}")
+            self.btn_prev.config(state="normal" if self.current_image_index > 0 else "disabled")
+            self.btn_next.config(state="normal" if self.current_image_index < total - 1 else "disabled")
+            self.btn_batch_remove.config(state="normal" if total > 1 else "disabled")
+        else:
+            self.image_counter_label.config(text="0 / 0")
+            self.btn_prev.config(state="disabled")
+            self.btn_next.config(state="disabled")
+            self.btn_batch_remove.config(state="disabled")
+    
+    def _update_batch_display(self, current_idx, total):
+        self._update_nav_buttons()
+        self._refresh_display(f"Processing {current_idx + 1}/{total}...")
+    
+    def _prev_image(self):
+        if self.image_list and self.current_image_index > 0:
+            self.current_image_index -= 1
+            self.image = self.image_list[self.current_image_index]
+            self.original_image = self.original_image_list[self.current_image_index]
+            self.roi_selected = False
+            self.zoom_scale = 1.0
+            self._update_nav_buttons()
+            self._update_display(f"Image {self.current_image_index + 1}/{len(self.image_list)}")
+    
+    def _next_image(self):
+        if self.image_list and self.current_image_index < len(self.image_list) - 1:
+            self.current_image_index += 1
+            self.image = self.image_list[self.current_image_index]
+            self.original_image = self.original_image_list[self.current_image_index]
+            self.roi_selected = False
+            self.zoom_scale = 1.0
+            self._update_nav_buttons()
+            self._update_display(f"Image {self.current_image_index + 1}/{len(self.image_list)}")
         
     def _switch_mode(self):
         self.mode = self.mode_var.get()
@@ -243,36 +299,57 @@ class WatermarkRemover:
         self.root.wait_window(crop_window)
             
     def _open_image(self):
-        filepath = filedialog.askopenfilename(
+        filepaths = filedialog.askopenfilenames(
             filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.webp")]
         )
-        if filepath:
-            try:
-                with open(filepath, 'rb') as f:
-                    img_array = np.frombuffer(f.read(), dtype=np.uint8)
-                self.image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-                if self.image is not None:
-                    self.original_image = self.image.copy()
-                    self.roi_selected = False
-                    self.zoom_scale = 1.0
-                    msg = "Image loaded. "
-                    if self.mode == "text":
-                        msg += "Enter watermark text."
-                    elif self.mode == "image":
-                        msg += "Load template and click Remove." if self.template_image is None else "Click Remove to find watermark."
+        if filepaths:
+            existing_count = len(self.image_list)
+            failed_files = []
+            new_count = 0
+            
+            for filepath in filepaths:
+                try:
+                    with open(filepath, 'rb') as f:
+                        img_array = np.frombuffer(f.read(), dtype=np.uint8)
+                    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                    if img is not None:
+                        self.image_list.append(img)
+                        self.original_image_list.append(img.copy())
+                        new_count += 1
                     else:
-                        msg += "Drag to select watermark area."
-                    self._update_display(msg)
+                        failed_files.append(filepath)
+                except Exception as e:
+                    failed_files.append(filepath)
+            
+            if new_count > 0:
+                self.current_image_index = len(self.image_list) - 1
+                self.image = self.image_list[self.current_image_index]
+                self.original_image = self.original_image_list[self.current_image_index]
+                self.roi_selected = False
+                self.zoom_scale = 1.0
+                
+                total_count = len(self.image_list)
+                count_msg = f"Added {new_count} image(s), total: {total_count}"
+                if failed_files:
+                    count_msg += f", {len(failed_files)} failed"
+                
+                self._update_nav_buttons()
+                msg = f"{count_msg}. "
+                if self.mode == "text":
+                    msg += "Enter watermark text."
+                elif self.mode == "image":
+                    msg += "Load template and click Remove." if self.template_image is None else "Click Remove to find watermark."
                 else:
-                    self._update_status("Failed to decode image!")
-            except Exception as e:
-                self._update_status(f"Error: {str(e)}")
+                    msg += "Drag to select watermark area."
+                self._update_display(msg)
+            else:
+                self._update_status("No valid images loaded!")
                 
     def _remove_watermark(self):
         if self.image is None:
             self._update_status("Please open an image first!")
             return
-            
+        
         if self.mode == "box":
             if not self.roi_selected:
                 self._update_status("Please select watermark area first!")
@@ -289,6 +366,30 @@ class WatermarkRemover:
                 self._update_status("Please load a template image first!")
                 return
             self._start_image_removal()
+    
+    def _batch_remove_watermark(self):
+        if self.image is None:
+            self._update_status("Please open images first!")
+            return
+        
+        if len(self.image_list) <= 1:
+            self._update_status("Batch Remove requires multiple images!")
+            return
+        
+        if self.mode == "box":
+            self._update_status("Box mode does not support batch processing. Use Text or Image mode.")
+            return
+        elif self.mode == "text":
+            watermark_text = self.text_entry.get().strip()
+            if not watermark_text:
+                self._update_status("Please enter watermark text!")
+                return
+            self._start_batch_text_removal(watermark_text)
+        else:
+            if self.template_image is None:
+                self._update_status("Please load a template image first!")
+                return
+            self._start_batch_image_removal()
     
     def _start_box_removal(self):
         self.progress_bar.pack(fill="x")
@@ -313,6 +414,24 @@ class WatermarkRemover:
         self.root.update()
         
         threading.Thread(target=self._process_image_in_background, daemon=True).start()
+    
+    def _start_batch_text_removal(self, watermark_text):
+        self.batch_processing = True
+        self.progress_bar.pack(fill="x")
+        self.progress_bar.start(10)
+        self._update_status(f"Batch processing: 0/{len(self.image_list)} images...")
+        self.root.update()
+        
+        threading.Thread(target=self._process_batch_text_in_background, args=(watermark_text,), daemon=True).start()
+    
+    def _start_batch_image_removal(self):
+        self.batch_processing = True
+        self.progress_bar.pack(fill="x")
+        self.progress_bar.start(10)
+        self._update_status(f"Batch processing: 0/{len(self.image_list)} images...")
+        self.root.update()
+        
+        threading.Thread(target=self._process_batch_image_in_background, daemon=True).start()
     
     def _process_box_in_background(self):
         try:
@@ -383,6 +502,182 @@ class WatermarkRemover:
             self._apply_lama_inpaint(mask)
             
         except Exception as e:
+            self.root.after(0, lambda: self._handle_error(str(e)))
+    
+    def _process_batch_text_in_background(self, watermark_text):
+        try:
+            if self.ocr_reader is None:
+                self.root.after(0, lambda: self._update_status("Loading OCR model..."))
+                self.ocr_reader = RapidOCR()
+            
+            if self.simple_lama is None:
+                self.root.after(0, lambda: self._update_status("Loading LaMa model..."))
+                self.simple_lama = SimpleLama()
+            
+            total = len(self.image_list)
+            success_count = 0
+            fail_count = 0
+            watermark_lower = watermark_text.lower().replace(" ", "").replace("AI", "ai")
+            
+            for idx, img in enumerate(self.image_list):
+                self.current_image_index = idx
+                self.image = self.image_list[idx]
+                self.original_image = self.original_image_list[idx]
+                self.root.after(0, lambda i=idx: self._update_batch_display(i, total))
+                
+                try:
+                    image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    result, elapse = self.ocr_reader(image_rgb)
+                    
+                    if result is None or len(result) == 0:
+                        fail_count += 1
+                        continue
+                    
+                    matched_boxes = []
+                    for detection in result:
+                        bbox = detection[0]
+                        text = detection[1]
+                        text_clean = text.lower().replace(" ", "").replace("AI", "ai")
+                        
+                        if watermark_lower in text_clean or text_clean in watermark_lower:
+                            matched_boxes.append(bbox)
+                    
+                    if not matched_boxes:
+                        fail_count += 1
+                        continue
+                    
+                    mask = np.zeros(img.shape[:2], dtype=np.uint8)
+                    for bbox in matched_boxes:
+                        pts = np.array(bbox, dtype=np.int32)
+                        cv2.fillPoly(mask, [pts], 255)
+                    
+                    image_pil = Image.fromarray(image_rgb)
+                    mask_pil = Image.fromarray(mask).convert("L")
+                    result_pil = self.simple_lama(image_pil, mask_pil)
+                    result_array = np.array(result_pil)
+                    new_image = cv2.cvtColor(result_array, cv2.COLOR_RGB2BGR)
+                    
+                    self.image_list[idx] = new_image
+                    success_count += 1
+                    
+                except Exception as e:
+                    fail_count += 1
+                    continue
+            
+            self.batch_processing = False
+            self.root.after(0, lambda: self._finish_batch_processing(success_count, fail_count))
+            
+        except Exception as e:
+            self.batch_processing = False
+            self.root.after(0, lambda: self._handle_error(str(e)))
+    
+    def _process_batch_image_in_background(self):
+        try:
+            if self.simple_lama is None:
+                self.root.after(0, lambda: self._update_status("Loading LaMa model..."))
+                self.simple_lama = SimpleLama()
+            
+            template = self.template_image
+            template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+            template_edges = cv2.Canny(template_gray, 50, 150)
+            
+            try:
+                threshold = float(self.threshold_var.get())
+            except:
+                threshold = 0.3
+            
+            def compute_gradient_direction(img):
+                gx = cv2.Sobel(img, cv2.CV_32F, 1, 0, ksize=3)
+                gy = cv2.Sobel(img, cv2.CV_32F, 0, 1, ksize=3)
+                angle = cv2.phase(gx, gy, angleInDegrees=True)
+                return angle
+            
+            template_grad = compute_gradient_direction(template_gray)
+            scales = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.5, 1.8, 2.0, 2.5, 3.0]
+            
+            total = len(self.image_list)
+            success_count = 0
+            fail_count = 0
+            
+            for idx, img in enumerate(self.image_list):
+                self.current_image_index = idx
+                self.image = self.image_list[idx]
+                self.original_image = self.original_image_list[idx]
+                self.root.after(0, lambda i=idx: self._update_batch_display(i, total))
+                
+                try:
+                    img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    img_edges = cv2.Canny(img_gray, 50, 150)
+                    img_grad = compute_gradient_direction(img_gray)
+                    
+                    matched_regions = []
+                    best_score = 0.0
+                    
+                    for scale in scales:
+                        scaled_template = cv2.resize(template_gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
+                        scaled_edges = cv2.resize(template_edges, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
+                        scaled_grad = cv2.resize(template_grad, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
+                        sth, stw = scaled_template.shape[:2]
+                        
+                        if sth >= img_gray.shape[0] or stw >= img_gray.shape[1]:
+                            continue
+                        
+                        result_gray = cv2.matchTemplate(img_gray, scaled_template, cv2.TM_CCOEFF_NORMED)
+                        result_edges = cv2.matchTemplate(img_edges, scaled_edges, cv2.TM_CCOEFF_NORMED)
+                        result_grad = cv2.matchTemplate(img_grad, scaled_grad, cv2.TM_CCOEFF_NORMED)
+                        result_combined = np.maximum(result_gray, np.maximum(result_edges, result_grad))
+                        
+                        max_val = np.max(result_combined)
+                        if max_val > best_score:
+                            best_score = max_val
+                        
+                        loc = np.where(result_combined >= threshold)
+                        for pt in zip(*loc[::-1]):
+                            score = result_combined[pt[1], pt[0]]
+                            matched_regions.append((pt[0], pt[1], pt[0] + stw, pt[1] + sth, score))
+                    
+                    if not matched_regions:
+                        fail_count += 1
+                        continue
+                    
+                    def overlap(r1, r2):
+                        return not (r1[2] <= r2[0] or r1[0] >= r2[2] or r1[3] <= r2[1] or r1[1] >= r2[3])
+                    
+                    matched_regions.sort(key=lambda x: x[4], reverse=True)
+                    filtered_regions = []
+                    for region in matched_regions:
+                        is_dup = False
+                        for fr in filtered_regions:
+                            if overlap(region, fr):
+                                is_dup = True
+                                break
+                        if not is_dup:
+                            filtered_regions.append(region)
+                    
+                    mask = np.zeros(img.shape[:2], dtype=np.uint8)
+                    for region in filtered_regions:
+                        x1, y1, x2, y2 = region[:4]
+                        cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+                    
+                    image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    image_pil = Image.fromarray(image_rgb)
+                    mask_pil = Image.fromarray(mask).convert("L")
+                    result_pil = self.simple_lama(image_pil, mask_pil)
+                    result_array = np.array(result_pil)
+                    new_image = cv2.cvtColor(result_array, cv2.COLOR_RGB2BGR)
+                    
+                    self.image_list[idx] = new_image
+                    success_count += 1
+                    
+                except Exception as e:
+                    fail_count += 1
+                    continue
+            
+            self.batch_processing = False
+            self.root.after(0, lambda: self._finish_batch_processing(success_count, fail_count))
+            
+        except Exception as e:
+            self.batch_processing = False
             self.root.after(0, lambda: self._handle_error(str(e)))
     
     def _process_image_in_background(self):
@@ -500,8 +795,24 @@ class WatermarkRemover:
         self.progress_bar.stop()
         self.progress_bar.pack_forget()
         self.image = new_image
+        self.image_list[self.current_image_index] = new_image
         self.roi_selected = False
         self._refresh_display("Watermark removed! Click [Save] to save.")
+    
+    def _finish_batch_processing(self, success_count, fail_count):
+        self.progress_bar.stop()
+        self.progress_bar.pack_forget()
+        
+        self.current_image_index = 0
+        self.image = self.image_list[0]
+        self.original_image = self.original_image_list[0]
+        self.roi_selected = False
+        self.zoom_scale = 1.0
+        
+        self._update_nav_buttons()
+        
+        msg = f"Batch complete: {success_count} succeeded, {fail_count} failed"
+        self._update_display(msg)
     
     def _handle_error(self, error_msg):
         self.progress_bar.stop()
@@ -512,20 +823,37 @@ class WatermarkRemover:
         if self.image is None:
             self._update_status("No image to save!")
             return
-        filepath = filedialog.asksaveasfilename(
-            defaultextension=".png",
-            filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg"), ("All files", "*.*")]
-        )
-        if filepath:
-            cv2.imwrite(filepath, self.image)
-            self._update_status(f"Saved: {filepath}")
+        
+        if len(self.image_list) > 1:
+            folder = filedialog.askdirectory(title="Select folder to save all images")
+            if folder:
+                saved_count = 0
+                for idx, img in enumerate(self.image_list):
+                    filename = f"processed_{idx + 1}.png"
+                    filepath = f"{folder}/{filename}"
+                    cv2.imwrite(filepath, img)
+                    saved_count += 1
+                self._update_status(f"Saved {saved_count} images to {folder}")
+        else:
+            filepath = filedialog.asksaveasfilename(
+                defaultextension=".png",
+                filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg"), ("All files", "*.*")]
+            )
+            if filepath:
+                cv2.imwrite(filepath, self.image)
+                self._update_status(f"Saved: {filepath}")
             
     def _reset_image(self):
-        if self.original_image is not None:
-            self.image = self.original_image.copy()
+        if self.original_image_list:
+            for idx, orig in enumerate(self.original_image_list):
+                self.image_list[idx] = orig.copy()
+            
+            self.image = self.image_list[self.current_image_index]
+            self.original_image = self.original_image_list[self.current_image_index]
             self.roi_selected = False
             self.zoom_scale = 1.0
-            msg = "Image reset. "
+            
+            msg = f"Reset image {self.current_image_index + 1}/{len(self.image_list)}. "
             if self.mode == "text":
                 msg += "Enter watermark text."
             elif self.mode == "image":
