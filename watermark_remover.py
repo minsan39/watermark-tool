@@ -9,6 +9,11 @@ from rapidocr_onnxruntime import RapidOCR
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import torch
 from tkinterdnd2 import TkinterDnD, DND_FILES
+import argparse
+import json
+import sys
+import os
+import glob
 
 class WatermarkRemover:
     def __init__(self, root):
@@ -1511,7 +1516,367 @@ class WatermarkRemover:
         zoom_pct = int(self.zoom_scale * 100)
         self._update_status(f"缩放: {zoom_pct}%")
 
+class WatermarkRemoverCLI:
+    def __init__(self):
+        self.device = self._detect_device()
+        self.simple_lama = None
+        self.ocr_reader = None
+    
+    def _detect_device(self):
+        if torch.cuda.is_available():
+            return "cuda"
+        return "cpu"
+    
+    def _load_image(self, path):
+        try:
+            with open(path, 'rb') as f:
+                img_array = np.frombuffer(f.read(), dtype=np.uint8)
+            img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            return img
+        except Exception as e:
+            return None
+    
+    def _save_image(self, img, path):
+        try:
+            ext = path.rsplit('.', 1)[-1].lower()
+            if ext in ['jpg', 'jpeg']:
+                cv2.imencode('.jpg', img)[1].tofile(path)
+            elif ext == 'png':
+                cv2.imencode('.png', img)[1].tofile(path)
+            elif ext == 'webp':
+                cv2.imencode('.webp', img)[1].tofile(path)
+            else:
+                cv2.imencode('.png', img)[1].tofile(path)
+            return True
+        except Exception as e:
+            return False
+    
+    def _get_lama(self):
+        if self.simple_lama is None:
+            self.simple_lama = SimpleLama(device=torch.device(self.device))
+        return self.simple_lama
+    
+    def _get_ocr(self):
+        if self.ocr_reader is None:
+            self.ocr_reader = RapidOCR()
+        return self.ocr_reader
+    
+    def remove_by_text(self, image_path, watermark_text, output_path=None):
+        result = {"success": False, "message": "", "output_path": ""}
+        
+        img = self._load_image(image_path)
+        if img is None:
+            result["message"] = f"无法加载图片: {image_path}"
+            return result
+        
+        ocr = self._get_ocr()
+        image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        ocr_result, _ = ocr(image_rgb)
+        
+        if ocr_result is None or len(ocr_result) == 0:
+            result["message"] = "图片中未检测到文字"
+            return result
+        
+        watermark_lower = watermark_text.lower().replace(" ", "").replace("AI", "ai")
+        matched_boxes = []
+        
+        for detection in ocr_result:
+            bbox = detection[0]
+            text = detection[1]
+            text_clean = text.lower().replace(" ", "").replace("AI", "ai")
+            
+            if watermark_lower in text_clean or text_clean in watermark_lower:
+                matched_boxes.append(bbox)
+        
+        if not matched_boxes:
+            result["message"] = f"未找到水印文字: {watermark_text}"
+            return result
+        
+        mask = np.zeros(img.shape[:2], dtype=np.uint8)
+        for bbox in matched_boxes:
+            pts = np.array(bbox, dtype=np.int32)
+            cv2.fillPoly(mask, [pts], 255)
+        
+        lama = self._get_lama()
+        image_pil = Image.fromarray(image_rgb)
+        mask_pil = Image.fromarray(mask).convert("L")
+        result_pil = lama(image_pil, mask_pil)
+        result_array = np.array(result_pil)
+        new_image = cv2.cvtColor(result_array, cv2.COLOR_RGB2BGR)
+        
+        if output_path is None:
+            output_path = image_path
+        
+        if self._save_image(new_image, output_path):
+            result["success"] = True
+            result["message"] = f"成功移除水印，找到 {len(matched_boxes)} 个匹配区域"
+            result["output_path"] = output_path
+        else:
+            result["message"] = f"保存图片失败: {output_path}"
+        
+        return result
+    
+    def remove_by_template(self, image_path, template_path, output_path=None, threshold=0.3):
+        result = {"success": False, "message": "", "output_path": "", "regions_found": 0}
+        
+        img = self._load_image(image_path)
+        if img is None:
+            result["message"] = f"无法加载图片: {image_path}"
+            return result
+        
+        template = self._load_image(template_path)
+        if template is None:
+            result["message"] = f"无法加载模板: {template_path}"
+            return result
+        
+        template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+        img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        scales = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.5, 1.8, 2.0, 2.5, 3.0]
+        img_h, img_w = img_gray.shape
+        
+        matched_regions = []
+        
+        for scale in scales:
+            interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC
+            t_gray = cv2.resize(template_gray, None, fx=scale, fy=scale, interpolation=interp)
+            sth, stw = t_gray.shape[:2]
+            
+            if sth < img_h and stw < img_w:
+                try:
+                    res = cv2.matchTemplate(img_gray, t_gray, cv2.TM_CCOEFF_NORMED)
+                    max_val = np.max(res)
+                    
+                    if max_val >= threshold:
+                        loc = np.where(res >= threshold)
+                        for pt in zip(*loc[::-1]):
+                            matched_regions.append((pt[0], pt[1], pt[0] + stw, pt[1] + sth))
+                except:
+                    pass
+        
+        if not matched_regions:
+            result["message"] = f"未找到匹配的水印区域，请尝试降低阈值 (当前: {threshold})"
+            return result
+        
+        def overlap(r1, r2):
+            return not (r1[2] <= r2[0] or r1[0] >= r2[2] or r1[3] <= r2[1] or r1[1] >= r2[3])
+        
+        matched_regions.sort(key=lambda x: (x[2]-x[0])*(x[3]-x[1]), reverse=True)
+        filtered_regions = []
+        for region in matched_regions:
+            is_dup = False
+            for fr in filtered_regions:
+                if overlap(region, fr):
+                    is_dup = True
+                    break
+            if not is_dup:
+                filtered_regions.append(region)
+        
+        mask = np.zeros(img.shape[:2], dtype=np.uint8)
+        for region in filtered_regions:
+            x1, y1, x2, y2 = region
+            cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+        
+        lama = self._get_lama()
+        image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        image_pil = Image.fromarray(image_rgb)
+        mask_pil = Image.fromarray(mask).convert("L")
+        result_pil = lama(image_pil, mask_pil)
+        result_array = np.array(result_pil)
+        new_image = cv2.cvtColor(result_array, cv2.COLOR_RGB2BGR)
+        
+        if output_path is None:
+            output_path = image_path
+        
+        if self._save_image(new_image, output_path):
+            result["success"] = True
+            result["message"] = f"成功移除水印"
+            result["output_path"] = output_path
+            result["regions_found"] = len(filtered_regions)
+        else:
+            result["message"] = f"保存图片失败: {output_path}"
+        
+        return result
+    
+    def remove_by_box(self, image_path, coords, output_path=None):
+        result = {"success": False, "message": "", "output_path": ""}
+        
+        img = self._load_image(image_path)
+        if img is None:
+            result["message"] = f"无法加载图片: {image_path}"
+            return result
+        
+        try:
+            coords_list = [int(c.strip()) for c in coords.split(',')]
+            if len(coords_list) != 4:
+                result["message"] = "坐标格式错误，应为: x1,y1,x2,y2"
+                return result
+            x1, y1, x2, y2 = coords_list
+        except:
+            result["message"] = "坐标解析失败，格式应为: x1,y1,x2,y2"
+            return result
+        
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(img.shape[1], x2)
+        y2 = min(img.shape[0], y2)
+        
+        if x2 <= x1 or y2 <= y1:
+            result["message"] = "坐标区域无效"
+            return result
+        
+        mask = np.zeros(img.shape[:2], dtype=np.uint8)
+        cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+        
+        lama = self._get_lama()
+        image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        image_pil = Image.fromarray(image_rgb)
+        mask_pil = Image.fromarray(mask).convert("L")
+        result_pil = lama(image_pil, mask_pil)
+        result_array = np.array(result_pil)
+        new_image = cv2.cvtColor(result_array, cv2.COLOR_RGB2BGR)
+        
+        if output_path is None:
+            output_path = image_path
+        
+        if self._save_image(new_image, output_path):
+            result["success"] = True
+            result["message"] = f"成功移除指定区域的水印"
+            result["output_path"] = output_path
+        else:
+            result["message"] = f"保存图片失败: {output_path}"
+        
+        return result
+    
+    def process_batch(self, input_path, mode, text=None, template_path=None, coords=None, threshold=0.3, output_dir=None):
+        results = []
+        
+        if os.path.isfile(input_path):
+            image_paths = [input_path]
+        elif os.path.isdir(input_path):
+            image_paths = []
+            for ext in ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.webp']:
+                image_paths.extend(glob.glob(os.path.join(input_path, ext)))
+                image_paths.extend(glob.glob(os.path.join(input_path, ext.upper())))
+        else:
+            return [{"success": False, "message": f"输入路径不存在: {input_path}"}]
+        
+        if not image_paths:
+            return [{"success": False, "message": "未找到有效的图片文件"}]
+        
+        for img_path in image_paths:
+            output_path = None
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+                filename = os.path.basename(img_path)
+                output_path = os.path.join(output_dir, filename)
+            
+            if mode == "text":
+                res = self.remove_by_text(img_path, text, output_path)
+            elif mode == "image":
+                res = self.remove_by_template(img_path, template_path, output_path, threshold)
+            elif mode == "box":
+                res = self.remove_by_box(img_path, coords, output_path)
+            else:
+                res = {"success": False, "message": f"未知模式: {mode}"}
+            
+            res["input_path"] = img_path
+            results.append(res)
+        
+        return results
+
+def main_cli():
+    parser = argparse.ArgumentParser(
+        description="水印去除工具 - AI调用接口",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 文字模式 - 移除指定文字水印
+  python watermark_remover.py --input image.jpg --mode text --text "Sample"
+  
+  # 图像模板模式 - 移除模板匹配的水印
+  python watermark_remover.py --input image.jpg --mode image --template logo.png
+  
+  # 框选模式 - 移除指定坐标区域
+  python watermark_remover.py --input image.jpg --mode box --coords "100,100,200,50"
+  
+  # 批量处理
+  python watermark_remover.py --input ./images/ --mode text --text "水印" --batch
+  
+  # 指定输出路径
+  python watermark_remover.py --input image.jpg --mode text --text "水印" --output result.jpg
+        """
+    )
+    
+    parser.add_argument("--input", "-i", required=True, help="输入图片路径或目录")
+    parser.add_argument("--mode", "-m", choices=["text", "image", "box"], default="text", help="去除模式: text(文字), image(模板), box(坐标)")
+    parser.add_argument("--text", "-t", help="水印文字 (text模式必需)")
+    parser.add_argument("--template", "-tp", help="模板图片路径 (image模式必需)")
+    parser.add_argument("--coords", "-c", help="坐标区域 x1,y1,x2,y2 (box模式必需)")
+    parser.add_argument("--output", "-o", help="输出图片路径")
+    parser.add_argument("--output-dir", "-od", help="批量处理输出目录")
+    parser.add_argument("--threshold", "-th", type=float, default=0.3, help="模板匹配阈值 (0.1-0.9, 默认0.3)")
+    parser.add_argument("--batch", "-b", action="store_true", help="批量处理模式")
+    parser.add_argument("--json", "-j", action="store_true", help="以JSON格式输出结果")
+    
+    args = parser.parse_args()
+    
+    if args.mode == "text" and not args.text:
+        error = {"success": False, "message": "text模式需要指定 --text 参数"}
+        print(json.dumps(error, ensure_ascii=False))
+        sys.exit(1)
+    
+    if args.mode == "image" and not args.template:
+        error = {"success": False, "message": "image模式需要指定 --template 参数"}
+        print(json.dumps(error, ensure_ascii=False))
+        sys.exit(1)
+    
+    if args.mode == "box" and not args.coords:
+        error = {"success": False, "message": "box模式需要指定 --coords 参数"}
+        print(json.dumps(error, ensure_ascii=False))
+        sys.exit(1)
+    
+    cli = WatermarkRemoverCLI()
+    
+    if args.batch or os.path.isdir(args.input):
+        results = cli.process_batch(
+            input_path=args.input,
+            mode=args.mode,
+            text=args.text,
+            template_path=args.template,
+            coords=args.coords,
+            threshold=args.threshold,
+            output_dir=args.output_dir
+        )
+        
+        if args.json:
+            print(json.dumps(results, ensure_ascii=False, indent=2))
+        else:
+            for r in results:
+                status = "✓" if r["success"] else "✗"
+                print(f"{status} {r.get('input_path', '')}: {r['message']}")
+    else:
+        if args.mode == "text":
+            result = cli.remove_by_text(args.input, args.text, args.output)
+        elif args.mode == "image":
+            result = cli.remove_by_template(args.input, args.template, args.output, args.threshold)
+        elif args.mode == "box":
+            result = cli.remove_by_box(args.input, args.coords, args.output)
+        
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            if result["success"]:
+                print(f"成功: {result['message']}")
+                if result.get("output_path"):
+                    print(f"输出: {result['output_path']}")
+            else:
+                print(f"失败: {result['message']}")
+
 if __name__ == "__main__":
-    root = TkinterDnD.Tk()
-    app = WatermarkRemover(root)
-    root.mainloop()
+    if len(sys.argv) > 1:
+        main_cli()
+    else:
+        root = TkinterDnD.Tk()
+        app = WatermarkRemover(root)
+        root.mainloop()
