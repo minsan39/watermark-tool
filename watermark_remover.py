@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from tkinter import Tk, filedialog, Button, Canvas, Frame, Label, Entry, StringVar, Toplevel
+from tkinter import filedialog, Button, Canvas, Frame, Label, Entry, StringVar, Toplevel
 from tkinter import ttk
 from PIL import Image, ImageTk
 from simple_lama_inpainting import SimpleLama
@@ -8,6 +8,7 @@ import threading
 from rapidocr_onnxruntime import RapidOCR
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import torch
+from tkinterdnd2 import TkinterDnD, DND_FILES
 
 class WatermarkRemover:
     def __init__(self, root):
@@ -69,17 +70,32 @@ class WatermarkRemover:
         self.btn_batch_save.pack(side="left", padx=5)
         Button(btn_frame, text="Reset", command=self._reset_image, width=10).pack(side="left", padx=5)
         
-        nav_frame = Frame(self.root)
-        nav_frame.pack(pady=5)
+        self.tab_frame = Frame(self.root)
+        self.tab_frame.pack(fill="x", padx=10, pady=5)
         
-        self.btn_prev = Button(nav_frame, text="◀ Prev", command=self._prev_image, width=10, state="disabled")
-        self.btn_prev.pack(side="left", padx=5)
+        self.tab_canvas = Canvas(self.tab_frame, height=35, bg="#f0f0f0", highlightthickness=0)
+        self.tab_canvas.pack(side="left", fill="x", expand=True)
         
-        self.image_counter_label = Label(nav_frame, text="0 / 0", width=10)
-        self.image_counter_label.pack(side="left", padx=5)
+        self.tab_inner_frame = Frame(self.tab_canvas, bg="#f0f0f0")
+        self.tab_canvas.create_window(0, 0, window=self.tab_inner_frame, anchor="nw")
         
-        self.btn_next = Button(nav_frame, text="Next ▶", command=self._next_image, width=10, state="disabled")
-        self.btn_next.pack(side="left", padx=5)
+        self.tab_canvas.bind("<MouseWheel>", self._on_tab_scroll)
+        self.tab_canvas.bind("<Button-4>", self._on_tab_scroll)
+        self.tab_canvas.bind("<Button-5>", self._on_tab_scroll)
+        self.tab_inner_frame.bind("<MouseWheel>", self._on_tab_scroll)
+        
+        self.tabs = []
+        self.close_buttons = []
+        self.tab_hover_id = None
+        
+        self.drag_data = {
+            "dragging": False,
+            "drag_tab_idx": -1,
+            "start_x": 0,
+            "drag_text": ""
+        }
+        self.insert_indicator = None
+        self.drag_preview = None
         
         mode_frame = Frame(self.root)
         mode_frame.pack(pady=5)
@@ -123,7 +139,10 @@ class WatermarkRemover:
         
         self.canvas = Canvas(self.root, width=self.canvas_w, height=self.canvas_h, bg="gray")
         self.canvas.pack(padx=10, pady=10)
-        self.canvas.create_text(self.canvas_w//2, self.canvas_h//2, text="Click [Open] to load an image", fill="white", font=("Arial", 14))
+        self.canvas.create_text(self.canvas_w//2, self.canvas_h//2, text="Click [Open] or drag images here", fill="white", font=("Arial", 14))
+        
+        self.canvas.drop_target_register(DND_FILES)
+        self.canvas.dnd_bind('<<Drop>>', self._on_drop)
         
         self.canvas.bind("<ButtonPress-1>", self._on_mouse_down)
         self.canvas.bind("<B1-Motion>", self._on_mouse_move)
@@ -155,45 +174,295 @@ class WatermarkRemover:
         val = float(self.threshold_var.get())
         self.threshold_label.config(text=f"{val:.2f}")
     
-    def _update_nav_buttons(self):
+    def _update_tabs(self):
+        for tab in self.tabs:
+            tab.destroy()
+        for btn in self.close_buttons:
+            btn.destroy()
+        self.tabs = []
+        self.close_buttons = []
+        
+        if self.insert_indicator:
+            self.tab_canvas.delete("insert_indicator")
+            self.insert_indicator = None
+        
+        for idx, path in enumerate(self.image_paths):
+            filename = path.split('\\')[-1].split('/')[-1]
+            if len(filename) > 15:
+                filename = filename[:12] + "..."
+            
+            is_active = (idx == self.current_image_index)
+            bg_color = "#ffffff" if is_active else "#e0e0e0"
+            fg_color = "#000000"
+            
+            tab_container = Frame(self.tab_inner_frame, bg=bg_color, cursor="hand2")
+            tab_container.pack(side="left", padx=2, pady=2)
+            
+            tab_label = Label(tab_container, text=filename, bg=bg_color, fg=fg_color, 
+                             padx=8, pady=5, cursor="hand2")
+            tab_label.pack(side="left")
+            
+            close_btn = Label(tab_container, text="✕", bg=bg_color, fg="#888888",
+                             padx=5, pady=5, cursor="hand2")
+            close_btn.pack(side="left")
+            
+            tab_label.bind("<Button-1>", lambda e, i=idx: self._on_tab_click(e, i))
+            tab_container.bind("<Button-1>", lambda e, i=idx: self._on_tab_click(e, i))
+            
+            tab_label.bind("<B1-Motion>", lambda e, i=idx: self._on_tab_drag(e, i))
+            tab_container.bind("<B1-Motion>", lambda e, i=idx: self._on_tab_drag(e, i))
+            
+            tab_label.bind("<ButtonRelease-1>", lambda e, i=idx: self._on_tab_release(e, i))
+            tab_container.bind("<ButtonRelease-1>", lambda e, i=idx: self._on_tab_release(e, i))
+            
+            close_btn.bind("<Button-1>", lambda e, i=idx: self._close_tab(i))
+            close_btn.bind("<Enter>", lambda e, btn=close_btn: btn.config(fg="#ff4444"))
+            close_btn.bind("<Leave>", lambda e, btn=close_btn: btn.config(fg="#888888"))
+            
+            tab_container.bind("<Enter>", lambda e, c=tab_container, l=tab_label, b=close_btn, active=is_active: 
+                              self._on_tab_enter(c, l, b, active))
+            tab_container.bind("<Leave>", lambda e, c=tab_container, l=tab_label, b=close_btn, active=is_active: 
+                              self._on_tab_leave(c, l, b, active))
+            
+            for widget in [tab_container, tab_label, close_btn]:
+                widget.bind("<MouseWheel>", self._on_tab_scroll)
+                widget.bind("<Button-4>", self._on_tab_scroll)
+                widget.bind("<Button-5>", self._on_tab_scroll)
+            
+            self.tabs.append(tab_container)
+            self.close_buttons.append(close_btn)
+        
+        self.root.after(10, self._update_tab_scroll_region)
+        
         total = len(self.image_list)
-        if total > 0:
-            self.image_counter_label.config(text=f"{self.current_image_index + 1} / {total}")
-            self.btn_prev.config(state="normal" if self.current_image_index > 0 else "disabled")
-            self.btn_next.config(state="normal" if self.current_image_index < total - 1 else "disabled")
-            self.btn_batch_remove.config(state="normal" if total > 1 else "disabled")
-            self.btn_batch_save.config(state="normal" if total > 1 else "disabled")
+        if total > 1:
+            self.btn_batch_remove.config(state="normal")
+            self.btn_batch_save.config(state="normal")
         else:
-            self.image_counter_label.config(text="0 / 0")
-            self.btn_prev.config(state="disabled")
-            self.btn_next.config(state="disabled")
             self.btn_batch_remove.config(state="disabled")
             self.btn_batch_save.config(state="disabled")
     
+    def _on_tab_click(self, event, idx):
+        self.drag_data["dragging"] = False
+        self.drag_data["drag_tab_idx"] = idx
+        self.drag_data["start_x"] = event.x_root
+    
+    def _on_tab_drag(self, event, idx):
+        if abs(event.x_root - self.drag_data["start_x"]) < 10:
+            return
+        
+        if not self.drag_data["dragging"]:
+            self.drag_data["dragging"] = True
+            self.drag_data["drag_text"] = self.image_paths[idx].split('\\')[-1].split('/')[-1]
+            if len(self.drag_data["drag_text"]) > 15:
+                self.drag_data["drag_text"] = self.drag_data["drag_text"][:12] + "..."
+            self._show_drag_indicator(idx)
+            self._create_drag_preview(event)
+        
+        self._update_drag_preview(event)
+        self._update_insert_position(event)
+    
+    def _show_drag_indicator(self, drag_idx):
+        if drag_idx < len(self.tabs):
+            tab = self.tabs[drag_idx]
+            tab.config(bg="#b8d4e8")
+            for child in tab.winfo_children():
+                child.config(bg="#b8d4e8")
+    
+    def _create_drag_preview(self, event):
+        if self.drag_preview:
+            self.drag_preview.destroy()
+        
+        self.drag_preview = Toplevel(self.root)
+        self.drag_preview.overrideredirect(True)
+        self.drag_preview.attributes('-topmost', True)
+        self.drag_preview.attributes('-alpha', 0.85)
+        
+        preview_frame = Frame(self.drag_preview, bg="#0078d4", bd=1, relief="solid")
+        preview_frame.pack(fill="both", expand=True)
+        
+        label = Label(preview_frame, text=self.drag_data["drag_text"], 
+                     bg="#0078d4", fg="white", padx=10, pady=5, font=("Arial", 9))
+        label.pack()
+        
+        self._position_drag_preview(event)
+    
+    def _position_drag_preview(self, event):
+        if self.drag_preview:
+            x = event.x_root - 40
+            y = event.y_root - 15
+            self.drag_preview.geometry(f"+{x}+{y}")
+    
+    def _update_drag_preview(self, event):
+        self._position_drag_preview(event)
+    
+    def _update_insert_position(self, event):
+        if self.insert_indicator:
+            self.tab_canvas.delete("insert_indicator")
+        
+        canvas_x = self.tab_canvas.winfo_rootx()
+        mouse_x = event.x_root - canvas_x
+        
+        insert_idx = self._get_insert_index(mouse_x)
+        
+        if insert_idx is not None and insert_idx <= len(self.tabs):
+            if insert_idx < len(self.tabs):
+                tab = self.tabs[insert_idx]
+                tab_x = tab.winfo_x()
+                self.insert_indicator = self.tab_canvas.create_line(
+                    tab_x - 2, 2, tab_x - 2, 33, 
+                    fill="#0078d4", width=3, tags="insert_indicator"
+                )
+            else:
+                if self.tabs:
+                    last_tab = self.tabs[-1]
+                    last_x = last_tab.winfo_x() + last_tab.winfo_width()
+                    self.insert_indicator = self.tab_canvas.create_line(
+                        last_x + 2, 2, last_x + 2, 33, 
+                        fill="#0078d4", width=3, tags="insert_indicator"
+                    )
+    
+    def _get_insert_index(self, mouse_x):
+        for idx, tab in enumerate(self.tabs):
+            tab_x = tab.winfo_x()
+            tab_w = tab.winfo_width()
+            tab_center = tab_x + tab_w // 2
+            
+            if mouse_x < tab_center:
+                return idx
+        return len(self.tabs)
+    
+    def _on_tab_release(self, event, drag_idx):
+        if self.insert_indicator:
+            self.tab_canvas.delete("insert_indicator")
+            self.insert_indicator = None
+        
+        if self.drag_preview:
+            self.drag_preview.destroy()
+            self.drag_preview = None
+        
+        if self.drag_data["dragging"]:
+            canvas_x = self.tab_canvas.winfo_rootx()
+            mouse_x = event.x_root - canvas_x
+            insert_idx = self._get_insert_index(mouse_x)
+            
+            if insert_idx is not None and insert_idx != drag_idx:
+                self._reorder_tabs(drag_idx, insert_idx)
+            else:
+                self._update_tabs()
+        else:
+            self._switch_to_tab(drag_idx)
+        
+        self.drag_data["dragging"] = False
+        self.drag_data["drag_tab_idx"] = -1
+        self.drag_data["drag_text"] = ""
+    
+    def _reorder_tabs(self, from_idx, to_idx):
+        if from_idx < to_idx:
+            to_idx -= 1
+        
+        img = self.image_list.pop(from_idx)
+        self.image_list.insert(to_idx, img)
+        
+        orig = self.original_image_list.pop(from_idx)
+        self.original_image_list.insert(to_idx, orig)
+        
+        path = self.image_paths.pop(from_idx)
+        self.image_paths.insert(to_idx, path)
+        
+        if self.current_image_index == from_idx:
+            self.current_image_index = to_idx
+        elif from_idx < self.current_image_index <= to_idx:
+            self.current_image_index -= 1
+        elif to_idx <= self.current_image_index < from_idx:
+            self.current_image_index += 1
+        
+        self._update_tabs()
+    
+    def _on_tab_enter(self, container, label, btn, is_active):
+        if not is_active:
+            container.config(bg="#d0d0d0")
+            label.config(bg="#d0d0d0")
+            btn.config(bg="#d0d0d0")
+    
+    def _on_tab_leave(self, container, label, btn, is_active):
+        if is_active:
+            container.config(bg="#ffffff")
+            label.config(bg="#ffffff")
+            btn.config(bg="#ffffff")
+        else:
+            container.config(bg="#e0e0e0")
+            label.config(bg="#e0e0e0")
+            btn.config(bg="#e0e0e0")
+    
+    def _update_tab_scroll_region(self):
+        self.tab_canvas.update_idletasks()
+        self.tab_canvas.config(scrollregion=self.tab_canvas.bbox("all"))
+    
+    def _on_tab_scroll(self, event):
+        scroll_amount = 3
+        if event.num == 4 or (hasattr(event, 'delta') and event.delta > 0):
+            self.tab_canvas.xview_scroll(-scroll_amount, "units")
+        elif event.num == 5 or (hasattr(event, 'delta') and event.delta < 0):
+            self.tab_canvas.xview_scroll(scroll_amount, "units")
+    
+    def _switch_to_tab(self, idx):
+        if 0 <= idx < len(self.image_list):
+            self.current_image_index = idx
+            self.image = self.image_list[idx]
+            self.original_image = self.original_image_list[idx]
+            self.roi_selected = False
+            self.zoom_scale = 1.0
+            self._update_tabs()
+            self._update_display("")
+    
+    def _close_tab(self, idx):
+        if len(self.image_list) <= 1:
+            self.image_list = []
+            self.original_image_list = []
+            self.image_paths = []
+            self.current_image_index = -1
+            self.image = None
+            self.original_image = None
+            self._update_tabs()
+            self.canvas.delete("all")
+            self.canvas.create_text(self.canvas_w//2, self.canvas_h//2, 
+                                   text="Click [Open] or drag images here", 
+                                   fill="white", font=("Arial", 14))
+            self._update_status("Ready | Scroll to zoom, Right-drag to pan")
+            return
+        
+        del self.image_list[idx]
+        del self.original_image_list[idx]
+        del self.image_paths[idx]
+        
+        if self.current_image_index >= len(self.image_list):
+            self.current_image_index = len(self.image_list) - 1
+        elif self.current_image_index > idx:
+            self.current_image_index -= 1
+        
+        if self.image_list:
+            self.image = self.image_list[self.current_image_index]
+            self.original_image = self.original_image_list[self.current_image_index]
+        else:
+            self.image = None
+            self.original_image = None
+        
+        self.roi_selected = False
+        self._update_tabs()
+        
+        if self.image is not None:
+            self._update_display("")
+        else:
+            self.canvas.delete("all")
+            self.canvas.create_text(self.canvas_w//2, self.canvas_h//2, 
+                                   text="Click [Open] or drag images here", 
+                                   fill="white", font=("Arial", 14))
+    
     def _update_batch_display(self, current_idx, total):
-        self._update_nav_buttons()
+        self._update_tabs()
         self._refresh_display(f"Processing {current_idx + 1}/{total}...")
     
-    def _prev_image(self):
-        if self.image_list and self.current_image_index > 0:
-            self.current_image_index -= 1
-            self.image = self.image_list[self.current_image_index]
-            self.original_image = self.original_image_list[self.current_image_index]
-            self.roi_selected = False
-            self.zoom_scale = 1.0
-            self._update_nav_buttons()
-            self._update_display(f"Image {self.current_image_index + 1}/{len(self.image_list)}")
-    
-    def _next_image(self):
-        if self.image_list and self.current_image_index < len(self.image_list) - 1:
-            self.current_image_index += 1
-            self.image = self.image_list[self.current_image_index]
-            self.original_image = self.original_image_list[self.current_image_index]
-            self.roi_selected = False
-            self.zoom_scale = 1.0
-            self._update_nav_buttons()
-            self._update_display(f"Image {self.current_image_index + 1}/{len(self.image_list)}")
-        
     def _switch_mode(self):
         self.mode = self.mode_var.get()
         self.roi_selected = False
@@ -352,7 +621,7 @@ class WatermarkRemover:
                 if failed_files:
                     count_msg += f", {len(failed_files)} failed"
                 
-                self._update_nav_buttons()
+                self._update_tabs()
                 msg = f"{count_msg}. "
                 if self.mode == "text":
                     msg += "Enter watermark text."
@@ -363,6 +632,71 @@ class WatermarkRemover:
                 self._update_display(msg)
             else:
                 self._update_status("No valid images loaded!")
+    
+    def _on_drop(self, event):
+        dropped_data = event.data
+        
+        if dropped_data.startswith('{'):
+            paths = []
+            current_path = ""
+            in_braces = False
+            for char in dropped_data:
+                if char == '{':
+                    in_braces = True
+                elif char == '}':
+                    in_braces = False
+                    if current_path:
+                        paths.append(current_path)
+                        current_path = ""
+                elif char == ' ' and not in_braces:
+                    if current_path:
+                        paths.append(current_path)
+                        current_path = ""
+                else:
+                    current_path += char
+            if current_path:
+                paths.append(current_path)
+        else:
+            paths = dropped_data.split()
+        
+        valid_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
+        image_paths = []
+        for path in paths:
+            path = path.strip()
+            if path.lower().endswith(valid_extensions):
+                try:
+                    with open(path, 'rb') as f:
+                        img_array = np.frombuffer(f.read(), dtype=np.uint8)
+                    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                    if img is not None:
+                        image_paths.append((path, img))
+                except:
+                    pass
+        
+        if not image_paths:
+            self._update_status("No valid images found in dropped files!")
+            return
+        
+        for path, img in image_paths:
+            self.image_list.append(img)
+            self.original_image_list.append(img.copy())
+            self.image_paths.append(path)
+        
+        self.current_image_index = len(self.image_list) - 1
+        self.image = self.image_list[self.current_image_index]
+        self.original_image = self.original_image_list[self.current_image_index]
+        self.roi_selected = False
+        self.zoom_scale = 1.0
+        
+        self._update_tabs()
+        msg = f"Loaded {len(image_paths)} image(s) via drag & drop. "
+        if self.mode == "text":
+            msg += "Enter watermark text."
+        elif self.mode == "image":
+            msg += "Load template and click Remove." if self.template_image is None else "Click Remove to find watermark."
+        else:
+            msg += "Drag to select watermark area."
+        self._update_display(msg)
                 
     def _remove_watermark(self):
         if self.image is None:
@@ -860,7 +1194,7 @@ class WatermarkRemover:
         self.roi_selected = False
         self.zoom_scale = 1.0
         
-        self._update_nav_buttons()
+        self._update_tabs()
         
         msg = f"Batch complete: {success_count} succeeded, {fail_count} failed"
         self._update_display(msg)
@@ -1080,6 +1414,6 @@ class WatermarkRemover:
         self._update_status(f"Zoom: {zoom_pct}%")
 
 if __name__ == "__main__":
-    root = Tk()
+    root = TkinterDnD.Tk()
     app = WatermarkRemover(root)
     root.mainloop()
