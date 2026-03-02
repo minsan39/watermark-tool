@@ -56,27 +56,119 @@ class WatermarkRemover:
         else:
             print("No GPU detected, using CPU")
             return "cpu"
+    
+    def _setup_styles(self):
+        self.root.configure(bg="#f5f5f5")
+        self.button_styles = {
+            "font": ("Microsoft YaHei UI", 10),
+            "padding": 8,
+            "radius": 8
+        }
+    
+    def _create_rounded_button(self, parent, text, command, bg_color, fg_color, state="normal"):
+        btn_frame = Frame(parent, bg=parent["bg"])
+        btn_frame.pack(side="left", padx=4)
         
+        canvas = Canvas(btn_frame, width=80, height=32, 
+                       highlightthickness=0, bg=parent["bg"])
+        canvas.pack()
+        
+        def draw_button(event=None):
+            canvas.delete("all")
+            w, h = 80, 32
+            r = self.button_styles["radius"]
+            
+            if btn_state["disabled"]:
+                fill_color = "#cccccc"
+                text_color = "#888888"
+            elif btn_state["hover"]:
+                self._darken_color(bg_color, 0.15)
+                fill_color = self._darken_color(bg_color, 0.1)
+                text_color = fg_color
+            else:
+                fill_color = bg_color
+                text_color = fg_color
+            
+            canvas.create_arc(0, 0, r*2, r*2, start=90, extent=90, 
+                            fill=fill_color, outline=fill_color)
+            canvas.create_arc(w-r*2, 0, w, r*2, start=0, extent=90, 
+                            fill=fill_color, outline=fill_color)
+            canvas.create_arc(0, h-r*2, r*2, h, start=180, extent=90, 
+                            fill=fill_color, outline=fill_color)
+            canvas.create_arc(w-r*2, h-r*2, w, h, start=270, extent=90, 
+                            fill=fill_color, outline=fill_color)
+            
+            canvas.create_rectangle(r, 0, w-r, h, fill=fill_color, outline=fill_color)
+            canvas.create_rectangle(0, r, w, h-r, fill=fill_color, outline=fill_color)
+            
+            canvas.create_text(w//2, h//2, text=text, fill=text_color, 
+                             font=self.button_styles["font"])
+        
+        btn_state = {"hover": False, "disabled": state == "disabled"}
+        
+        def on_enter(e):
+            if not btn_state["disabled"]:
+                btn_state["hover"] = True
+                draw_button()
+        
+        def on_leave(e):
+            btn_state["hover"] = False
+            draw_button()
+        
+        def on_click(e):
+            if not btn_state["disabled"]:
+                command()
+        
+        canvas.bind("<Enter>", on_enter)
+        canvas.bind("<Leave>", on_leave)
+        canvas.bind("<Button-1>", on_click)
+        
+        draw_button()
+        
+        def set_state(new_state):
+            btn_state["disabled"] = (new_state == "disabled")
+            draw_button()
+        
+        canvas.set_state = set_state
+        return canvas
+    
+    def _darken_color(self, hex_color, factor):
+        hex_color = hex_color.lstrip('#')
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+        r = int(r * (1 - factor))
+        g = int(g * (1 - factor))
+        b = int(b * (1 - factor))
+        return f'#{r:02x}{g:02x}{b:02x}'
+    
     def _setup_ui(self):
-        btn_frame = Frame(self.root)
-        btn_frame.pack(pady=10)
+        self._setup_styles()
         
-        Button(btn_frame, text="Open", command=self._open_image, width=10).pack(side="left", padx=5)
-        Button(btn_frame, text="Remove", command=self._remove_watermark, width=10).pack(side="left", padx=5)
-        self.btn_batch_remove = Button(btn_frame, text="Batch Remove", command=self._batch_remove_watermark, width=12, state="disabled")
-        self.btn_batch_remove.pack(side="left", padx=5)
-        Button(btn_frame, text="Save", command=self._save_image, width=10).pack(side="left", padx=5)
-        self.btn_batch_save = Button(btn_frame, text="Batch Save", command=self._batch_save_image, width=10, state="disabled")
-        self.btn_batch_save.pack(side="left", padx=5)
-        Button(btn_frame, text="Reset", command=self._reset_image, width=10).pack(side="left", padx=5)
+        top_frame = Frame(self.root, bg="#f5f5f5")
+        top_frame.pack(fill="x", padx=10, pady=10)
         
-        self.tab_frame = Frame(self.root)
+        left_frame = Frame(top_frame, bg="#f5f5f5")
+        left_frame.pack(side="left")
+        
+        right_frame = Frame(top_frame, bg="#f5f5f5")
+        right_frame.pack(side="right")
+        
+        self._create_rounded_button(left_frame, "打开", self._open_image, "#4a90d9", "white")
+        self._create_rounded_button(left_frame, "重置", self._reset_image, "#6c757d", "white")
+        
+        self._create_rounded_button(right_frame, "移除", self._remove_watermark, "#28a745", "white")
+        self.btn_batch_remove = self._create_rounded_button(right_frame, "批量移除", self._batch_remove_watermark, "#20c997", "white", state="disabled")
+        self._create_rounded_button(right_frame, "保存", self._save_image, "#007bff", "white")
+        self.btn_batch_save = self._create_rounded_button(right_frame, "保存所有", self._batch_save_image, "#17a2b8", "white", state="disabled")
+        
+        self.tab_frame = Frame(self.root, bg="#f5f5f5")
         self.tab_frame.pack(fill="x", padx=10, pady=5)
         
-        self.tab_canvas = Canvas(self.tab_frame, height=35, bg="#f0f0f0", highlightthickness=0)
+        self.tab_canvas = Canvas(self.tab_frame, height=35, bg="#e8e8e8", highlightthickness=0)
         self.tab_canvas.pack(side="left", fill="x", expand=True)
         
-        self.tab_inner_frame = Frame(self.tab_canvas, bg="#f0f0f0")
+        self.tab_inner_frame = Frame(self.tab_canvas, bg="#e8e8e8")
         self.tab_canvas.create_window(0, 0, window=self.tab_inner_frame, anchor="nw")
         
         self.tab_canvas.bind("<MouseWheel>", self._on_tab_scroll)
@@ -97,49 +189,55 @@ class WatermarkRemover:
         self.insert_indicator = None
         self.drag_preview = None
         
-        mode_frame = Frame(self.root)
-        mode_frame.pack(pady=5)
+        mode_frame = Frame(self.root, bg="#f5f5f5")
+        mode_frame.pack(pady=5, fill="x", padx=10)
         
         self.mode_var = StringVar(value="box")
-        Label(mode_frame, text="Mode:").pack(side="left", padx=5)
+        Label(mode_frame, text="模式:", bg="#f5f5f5", font=("Microsoft YaHei UI", 9)).pack(side="left", padx=5)
         
-        ttk.Radiobutton(mode_frame, text="Box Select", variable=self.mode_var, 
-                        value="box", command=self._switch_mode).pack(side="left", padx=5)
-        ttk.Radiobutton(mode_frame, text="Text", variable=self.mode_var, 
-                        value="text", command=self._switch_mode).pack(side="left", padx=5)
-        ttk.Radiobutton(mode_frame, text="Image", variable=self.mode_var, 
-                        value="image", command=self._switch_mode).pack(side="left", padx=5)
+        style = ttk.Style()
+        style.configure("Mode.TRadiobutton", background="#f5f5f5", font=("Microsoft YaHei UI", 9))
         
-        self.text_frame = Frame(self.root)
-        Label(self.text_frame, text="Watermark Text:").pack(side="left", padx=5)
-        self.text_entry = Entry(self.text_frame, width=40)
+        ttk.Radiobutton(mode_frame, text="框选", variable=self.mode_var, 
+                        value="box", command=self._switch_mode, style="Mode.TRadiobutton").pack(side="left", padx=5)
+        ttk.Radiobutton(mode_frame, text="文字", variable=self.mode_var, 
+                        value="text", command=self._switch_mode, style="Mode.TRadiobutton").pack(side="left", padx=5)
+        ttk.Radiobutton(mode_frame, text="图像", variable=self.mode_var, 
+                        value="image", command=self._switch_mode, style="Mode.TRadiobutton").pack(side="left", padx=5)
+        
+        self.text_frame = Frame(self.root, bg="#f5f5f5")
+        Label(self.text_frame, text="水印文字:", bg="#f5f5f5", font=("Microsoft YaHei UI", 9)).pack(side="left", padx=5)
+        self.text_entry = Entry(self.text_frame, width=40, font=("Microsoft YaHei UI", 9), relief="solid", bd=1)
         self.text_entry.pack(side="left", padx=5)
-        self.text_frame.pack(pady=5)
+        self.text_frame.pack(pady=5, fill="x", padx=10)
         self.text_frame.pack_forget()
         
-        self.image_frame = Frame(self.root)
-        Label(self.image_frame, text="Template:").pack(side="left", padx=5)
-        Button(self.image_frame, text="Load Template", command=self._load_template, width=15).pack(side="left", padx=5)
-        self.template_label = Label(self.image_frame, text="No template loaded", fg="gray")
+        self.image_frame = Frame(self.root, bg="#f5f5f5")
+        Label(self.image_frame, text="模板:", bg="#f5f5f5", font=("Microsoft YaHei UI", 9)).pack(side="left", padx=5)
+        self._create_rounded_button(self.image_frame, "加载模板", self._load_template, "#6c757d", "white")
+        self.template_label = Label(self.image_frame, text="未加载模板", fg="gray", bg="#f5f5f5", font=("Microsoft YaHei UI", 9))
         self.template_label.pack(side="left", padx=5)
         
-        self.threshold_frame = Frame(self.root)
-        Label(self.threshold_frame, text="Threshold:").pack(side="left", padx=5)
+        self.threshold_frame = Frame(self.root, bg="#f5f5f5")
+        Label(self.threshold_frame, text="阈值:", bg="#f5f5f5", font=("Microsoft YaHei UI", 9)).pack(side="left", padx=5)
         self.threshold_var = StringVar(value="0.3")
         self.threshold_scale = ttk.Scale(self.threshold_frame, from_=0.1, to=0.9, variable=self.threshold_var, orient="horizontal", length=150)
         self.threshold_scale.pack(side="left", padx=5)
-        self.threshold_label = Label(self.threshold_frame, text="0.30", width=5)
+        self.threshold_label = Label(self.threshold_frame, text="0.30", width=5, bg="#f5f5f5", font=("Microsoft YaHei UI", 9))
         self.threshold_label.pack(side="left", padx=5)
         self.threshold_scale.bind("<Motion>", self._update_threshold_label)
         self.threshold_scale.bind("<ButtonRelease-1>", self._update_threshold_label)
-        self.threshold_frame.pack(pady=5)
+        self.threshold_frame.pack(pady=5, fill="x", padx=10)
         self.threshold_frame.pack_forget()
-        self.image_frame.pack(pady=5)
+        self.image_frame.pack(pady=5, fill="x", padx=10)
         self.image_frame.pack_forget()
         
-        self.canvas = Canvas(self.root, width=self.canvas_w, height=self.canvas_h, bg="gray")
-        self.canvas.pack(padx=10, pady=10)
-        self.canvas.create_text(self.canvas_w//2, self.canvas_h//2, text="Click [Open] or drag images here", fill="white", font=("Arial", 14))
+        canvas_frame = Frame(self.root, bg="#f5f5f5")
+        canvas_frame.pack(padx=10, pady=10, fill="both", expand=True)
+        
+        self.canvas = Canvas(canvas_frame, width=self.canvas_w, height=self.canvas_h, bg="#3c3c3c", highlightthickness=1, highlightbackground="#d0d0d0")
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.create_text(self.canvas_w//2, self.canvas_h//2, text="点击 [打开] 或拖拽图片到这里", fill="#888888", font=("Microsoft YaHei UI", 14))
         
         self.canvas.drop_target_register(DND_FILES)
         self.canvas.dnd_bind('<<Drop>>', self._on_drop)
@@ -154,12 +252,12 @@ class WatermarkRemover:
         self.canvas.bind("<Button-4>", self._on_mouse_wheel)
         self.canvas.bind("<Button-5>", self._on_mouse_wheel)
         
-        self.status_label = Frame(self.root, bd=1, relief="sunken")
+        self.status_label = Frame(self.root, bd=0, bg="#e0e0e0")
         self.status_label.pack(fill="x", padx=10, pady=5)
-        self.status_text = Label(self.status_label, text="Ready | Scroll to zoom, Right-drag to pan", anchor="w")
-        self.status_text.pack(fill="x", padx=5)
+        self.status_text = Label(self.status_label, text="就绪 | 滚轮缩放, 右键拖拽平移", anchor="w", bg="#e0e0e0", font=("Microsoft YaHei UI", 9), padx=10, pady=5)
+        self.status_text.pack(fill="x")
         
-        self.progress_frame = Frame(self.root)
+        self.progress_frame = Frame(self.root, bg="#f5f5f5")
         self.progress_frame.pack(fill="x", padx=10, pady=5)
         
         style = ttk.Style()
@@ -236,11 +334,11 @@ class WatermarkRemover:
         
         total = len(self.image_list)
         if total > 1:
-            self.btn_batch_remove.config(state="normal")
-            self.btn_batch_save.config(state="normal")
+            self.btn_batch_remove.set_state("normal")
+            self.btn_batch_save.set_state("normal")
         else:
-            self.btn_batch_remove.config(state="disabled")
-            self.btn_batch_save.config(state="disabled")
+            self.btn_batch_remove.set_state("disabled")
+            self.btn_batch_save.set_state("disabled")
     
     def _on_tab_click(self, event, idx):
         self.drag_data["dragging"] = False
@@ -427,9 +525,9 @@ class WatermarkRemover:
             self._update_tabs()
             self.canvas.delete("all")
             self.canvas.create_text(self.canvas_w//2, self.canvas_h//2, 
-                                   text="Click [Open] or drag images here", 
-                                   fill="white", font=("Arial", 14))
-            self._update_status("Ready | Scroll to zoom, Right-drag to pan")
+                                   text="点击 [打开] 或拖拽图片到这里", 
+                                   fill="#888888", font=("Microsoft YaHei UI", 14))
+            self._update_status("就绪 | 滚轮缩放, 右键拖拽平移")
             return
         
         del self.image_list[idx]
@@ -456,12 +554,12 @@ class WatermarkRemover:
         else:
             self.canvas.delete("all")
             self.canvas.create_text(self.canvas_w//2, self.canvas_h//2, 
-                                   text="Click [Open] or drag images here", 
-                                   fill="white", font=("Arial", 14))
+                                   text="点击 [打开] 或拖拽图片到这里", 
+                                   fill="#888888", font=("Microsoft YaHei UI", 14))
     
     def _update_batch_display(self, current_idx, total):
         self._update_tabs()
-        self._refresh_display(f"Processing {current_idx + 1}/{total}...")
+        self._refresh_display(f"处理中 {current_idx + 1}/{total}...")
     
     def _switch_mode(self):
         self.mode = self.mode_var.get()
@@ -472,17 +570,17 @@ class WatermarkRemover:
         self.threshold_frame.pack_forget()
         
         if self.mode == "text":
-            self.text_frame.pack(pady=5)
-            self._update_status("Text mode: Enter watermark text and click [Remove]")
+            self.text_frame.pack(pady=5, fill="x", padx=10)
+            self._update_status("文字模式: 输入水印文字后点击 [移除]")
         elif self.mode == "image":
-            self.image_frame.pack(pady=5)
-            self.threshold_frame.pack(pady=5)
+            self.image_frame.pack(pady=5, fill="x", padx=10)
+            self.threshold_frame.pack(pady=5, fill="x", padx=10)
             if self.template_image is not None:
-                self._update_status("Image mode: Click [Remove] to find and remove watermark")
+                self._update_status("图像模式: 点击 [移除] 查找并移除水印")
             else:
-                self._update_status("Image mode: Load a template image first")
+                self._update_status("图像模式: 请先加载模板图像")
         else:
-            self._update_status("Box mode: Drag to select watermark area")
+            self._update_status("框选模式: 拖拽选择水印区域")
         
         if self.image is not None:
             self._refresh_display("")
@@ -499,13 +597,13 @@ class WatermarkRemover:
                 if full_template is not None:
                     self._show_template_crop_window(full_template)
                 else:
-                    self._update_status("Failed to decode template image!")
+                    self._update_status("模板图像解码失败!")
             except Exception as e:
-                self._update_status(f"Error: {str(e)}")
+                self._update_status(f"错误: {str(e)}")
     
     def _show_template_crop_window(self, full_template):
         crop_window = Toplevel(self.root)
-        crop_window.title("Select Watermark Region")
+        crop_window.title("选择水印区域")
         
         h, w = full_template.shape[:2]
         max_w, max_h = 800, 600
@@ -515,7 +613,7 @@ class WatermarkRemover:
         
         crop_window.geometry(f"{display_w + 20}x{display_h + 100}")
         
-        Label(crop_window, text="Drag to select the watermark area, then click Confirm").pack(pady=5)
+        Label(crop_window, text="拖拽选择水印区域，然后点击确认").pack(pady=5)
         
         crop_canvas = Canvas(crop_window, width=display_w, height=display_h, bg="gray")
         crop_canvas.pack(padx=10, pady=5)
@@ -568,18 +666,18 @@ class WatermarkRemover:
                 if x2 > x1 and y2 > y1:
                     self.template_image = full_template[y1:y2, x1:x2]
                     th, tw = self.template_image.shape[:2]
-                    self.template_label.config(text=f"{tw}x{th} cropped", fg="green")
-                    self._update_status("Template cropped. Click [Remove] to find and remove watermark.")
+                    self.template_label.config(text=f"{tw}x{th} 已裁剪", fg="green")
+                    self._update_status("模板已裁剪。点击 [移除] 查找并移除水印。")
                     crop_window.destroy()
                 else:
-                    self._update_status("Invalid selection!")
+                    self._update_status("选择区域无效!")
             else:
-                self._update_status("Please select a region first!")
+                self._update_status("请先选择一个区域!")
         
         btn_frame = Frame(crop_window)
         btn_frame.pack(pady=10)
-        Button(btn_frame, text="Confirm", command=confirm_crop, width=10).pack(side="left", padx=5)
-        Button(btn_frame, text="Cancel", command=crop_window.destroy, width=10).pack(side="left", padx=5)
+        Button(btn_frame, text="确认", command=confirm_crop, width=10).pack(side="left", padx=5)
+        Button(btn_frame, text="取消", command=crop_window.destroy, width=10).pack(side="left", padx=5)
         
         crop_window.transient(self.root)
         crop_window.grab_set()
@@ -617,21 +715,21 @@ class WatermarkRemover:
                 self.zoom_scale = 1.0
                 
                 total_count = len(self.image_list)
-                count_msg = f"Added {new_count} image(s), total: {total_count}"
+                count_msg = f"已添加 {new_count} 张图片, 共 {total_count} 张"
                 if failed_files:
-                    count_msg += f", {len(failed_files)} failed"
+                    count_msg += f", {len(failed_files)} 张失败"
                 
                 self._update_tabs()
                 msg = f"{count_msg}. "
                 if self.mode == "text":
-                    msg += "Enter watermark text."
+                    msg += "请输入水印文字。"
                 elif self.mode == "image":
-                    msg += "Load template and click Remove." if self.template_image is None else "Click Remove to find watermark."
+                    msg += "加载模板后点击移除。" if self.template_image is None else "点击移除查找水印。"
                 else:
-                    msg += "Drag to select watermark area."
+                    msg += "拖拽选择水印区域。"
                 self._update_display(msg)
             else:
-                self._update_status("No valid images loaded!")
+                self._update_status("没有加载有效的图片!")
     
     def _on_drop(self, event):
         dropped_data = event.data
@@ -674,7 +772,7 @@ class WatermarkRemover:
                     pass
         
         if not image_paths:
-            self._update_status("No valid images found in dropped files!")
+            self._update_status("拖入的文件中没有有效图片!")
             return
         
         for path, img in image_paths:
@@ -689,65 +787,65 @@ class WatermarkRemover:
         self.zoom_scale = 1.0
         
         self._update_tabs()
-        msg = f"Loaded {len(image_paths)} image(s) via drag & drop. "
+        msg = f"已拖入 {len(image_paths)} 张图片。"
         if self.mode == "text":
-            msg += "Enter watermark text."
+            msg += "请输入水印文字。"
         elif self.mode == "image":
-            msg += "Load template and click Remove." if self.template_image is None else "Click Remove to find watermark."
+            msg += "加载模板后点击移除。" if self.template_image is None else "点击移除查找水印。"
         else:
-            msg += "Drag to select watermark area."
+            msg += "拖拽选择水印区域。"
         self._update_display(msg)
                 
     def _remove_watermark(self):
         if self.image is None:
-            self._update_status("Please open an image first!")
+            self._update_status("请先打开图片!")
             return
         
         if self.mode == "box":
             if not self.roi_selected:
-                self._update_status("Please select watermark area first!")
+                self._update_status("请先选择水印区域!")
                 return
             self._start_box_removal()
         elif self.mode == "text":
             watermark_text = self.text_entry.get().strip()
             if not watermark_text:
-                self._update_status("Please enter watermark text!")
+                self._update_status("请输入水印文字!")
                 return
             self._start_text_removal(watermark_text)
         else:
             if self.template_image is None:
-                self._update_status("Please load a template image first!")
+                self._update_status("请先加载模板图像!")
                 return
             self._start_image_removal()
     
     def _batch_remove_watermark(self):
         if self.image is None:
-            self._update_status("Please open images first!")
+            self._update_status("请先打开图片!")
             return
         
         if len(self.image_list) <= 1:
-            self._update_status("Batch Remove requires multiple images!")
+            self._update_status("批量移除需要多张图片!")
             return
         
         if self.mode == "box":
-            self._update_status("Box mode does not support batch processing. Use Text or Image mode.")
+            self._update_status("框选模式不支持批量处理。请使用文字或图像模式。")
             return
         elif self.mode == "text":
             watermark_text = self.text_entry.get().strip()
             if not watermark_text:
-                self._update_status("Please enter watermark text!")
+                self._update_status("请输入水印文字!")
                 return
             self._start_batch_text_removal(watermark_text)
         else:
             if self.template_image is None:
-                self._update_status("Please load a template image first!")
+                self._update_status("请先加载模板图像!")
                 return
             self._start_batch_image_removal()
     
     def _start_box_removal(self):
         self.progress_bar.pack(fill="x")
         self.progress_bar.start(10)
-        self._update_status("Processing with LaMa AI model...")
+        self._update_status("正在使用 LaMa AI 模型处理...")
         self.root.update()
         
         threading.Thread(target=self._process_box_in_background, daemon=True).start()
@@ -755,7 +853,7 @@ class WatermarkRemover:
     def _start_text_removal(self, watermark_text):
         self.progress_bar.pack(fill="x")
         self.progress_bar.start(10)
-        self._update_status("Initializing OCR and detecting text...")
+        self._update_status("正在初始化 OCR 并检测文字...")
         self.root.update()
         
         threading.Thread(target=self._process_text_in_background, args=(watermark_text,), daemon=True).start()
@@ -763,7 +861,7 @@ class WatermarkRemover:
     def _start_image_removal(self):
         self.progress_bar.pack(fill="x")
         self.progress_bar.start(10)
-        self._update_status("Searching for watermark pattern...")
+        self._update_status("正在搜索水印模式...")
         self.root.update()
         
         threading.Thread(target=self._process_image_in_background, daemon=True).start()
@@ -772,7 +870,7 @@ class WatermarkRemover:
         self.batch_processing = True
         self.progress_bar.pack(fill="x")
         self.progress_bar.start(10)
-        self._update_status(f"Batch processing: 0/{len(self.image_list)} images...")
+        self._update_status(f"批量处理: 0/{len(self.image_list)} 张图片...")
         self.root.update()
         
         threading.Thread(target=self._process_batch_text_in_background, args=(watermark_text,), daemon=True).start()
@@ -781,7 +879,7 @@ class WatermarkRemover:
         self.batch_processing = True
         self.progress_bar.pack(fill="x")
         self.progress_bar.start(10)
-        self._update_status(f"Batch processing: 0/{len(self.image_list)} images...")
+        self._update_status(f"批量处理: 0/{len(self.image_list)} 张图片...")
         self.root.update()
         
         threading.Thread(target=self._process_batch_image_in_background, daemon=True).start()
@@ -789,9 +887,9 @@ class WatermarkRemover:
     def _process_box_in_background(self):
         try:
             if self.simple_lama is None:
-                self.root.after(0, lambda: self._update_status("Loading LaMa model (first time will download ~200MB)..."))
+                self.root.after(0, lambda: self._update_status("正在加载 LaMa 模型 (首次需下载约200MB)..."))
                 self.simple_lama = SimpleLama(device=torch.device(self.device))
-                self.root.after(0, lambda: self._update_status("Processing with LaMa AI model..."))
+                self.root.after(0, lambda: self._update_status("正在使用 LaMa AI 模型处理..."))
                 
             real_ix = int((self.ix - self.offset_x) / (self.base_scale * self.zoom_scale))
             real_iy = int((self.iy - self.offset_y) / (self.base_scale * self.zoom_scale))
@@ -816,9 +914,9 @@ class WatermarkRemover:
     def _process_text_in_background(self, watermark_text):
         try:
             if self.ocr_reader is None:
-                self.root.after(0, lambda: self._update_status("Loading OCR model..."))
+                self.root.after(0, lambda: self._update_status("正在加载 OCR 模型..."))
                 self.ocr_reader = RapidOCR()
-                self.root.after(0, lambda: self._update_status("Detecting text in image..."))
+                self.root.after(0, lambda: self._update_status("正在检测图片中的文字..."))
             
             image_rgb = cv2.cvtColor(self.image, cv2.COLOR_BGR2RGB)
             result, elapse = self.ocr_reader(image_rgb)
@@ -839,10 +937,10 @@ class WatermarkRemover:
                 
                 if watermark_lower in text_clean or text_clean in watermark_lower:
                     matched_boxes.append(bbox)
-                    self.root.after(0, lambda t=text: self._update_status(f"Found matching text: '{t}'"))
+                    self.root.after(0, lambda t=text: self._update_status(f"找到匹配文字: '{t}'"))
             
             if not matched_boxes:
-                self.root.after(0, lambda: self._handle_error(f"Text '{watermark_text}' not found in image"))
+                self.root.after(0, lambda: self._handle_error(f"图片中未找到文字 '{watermark_text}'"))
                 return
             
             mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
@@ -851,7 +949,7 @@ class WatermarkRemover:
                 pts = np.array(bbox, dtype=np.int32)
                 cv2.fillPoly(mask, [pts], 255)
             
-            self.root.after(0, lambda: self._update_status("Processing with LaMa AI model..."))
+            self.root.after(0, lambda: self._update_status("正在使用 LaMa AI 模型处理..."))
             self._apply_lama_inpaint(mask)
             
         except Exception as e:
@@ -860,11 +958,11 @@ class WatermarkRemover:
     def _process_batch_text_in_background(self, watermark_text):
         try:
             if self.ocr_reader is None:
-                self.root.after(0, lambda: self._update_status("Loading OCR model..."))
+                self.root.after(0, lambda: self._update_status("正在加载 OCR 模型..."))
                 self.ocr_reader = RapidOCR()
             
             if self.simple_lama is None:
-                self.root.after(0, lambda: self._update_status("Loading LaMa model..."))
+                self.root.after(0, lambda: self._update_status("正在加载 LaMa 模型..."))
                 self.simple_lama = SimpleLama(device=torch.device(self.device))
             
             total = len(self.image_list)
@@ -927,7 +1025,7 @@ class WatermarkRemover:
     def _process_batch_image_in_background(self):
         try:
             if self.simple_lama is None:
-                self.root.after(0, lambda: self._update_status("Loading LaMa model..."))
+                self.root.after(0, lambda: self._update_status("正在加载 LaMa 模型..."))
                 self.simple_lama = SimpleLama(device=torch.device(self.device))
             
             template = self.template_image
@@ -1054,7 +1152,7 @@ class WatermarkRemover:
     
     def _process_image_in_background(self):
         try:
-            self.root.after(0, lambda: self._update_status("Performing parallel multi-scale template matching..."))
+            self.root.after(0, lambda: self._update_status("正在执行并行多尺度模板匹配..."))
             
             template = self.template_image
             img = self.image
@@ -1125,7 +1223,7 @@ class WatermarkRemover:
                         pass
             
             if not matched_regions:
-                msg = f"Best match score: {best_score:.2f}. Threshold: {threshold:.2f}. Try lowering threshold."
+                msg = f"最佳匹配分数: {best_score:.2f}。阈值: {threshold:.2f}。请尝试降低阈值。"
                 self.root.after(0, lambda: self._handle_error(msg))
                 return
             
@@ -1143,7 +1241,7 @@ class WatermarkRemover:
                 if not is_dup:
                     filtered_regions.append(region)
             
-            self.root.after(0, lambda: self._update_status(f"Found {len(filtered_regions)} watermark region(s)"))
+            self.root.after(0, lambda: self._update_status(f"找到 {len(filtered_regions)} 个水印区域"))
             
             mask = np.zeros(img.shape[:2], dtype=np.uint8)
             
@@ -1151,7 +1249,7 @@ class WatermarkRemover:
                 x1, y1, x2, y2 = region[:4]
                 cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
             
-            self.root.after(0, lambda: self._update_status("Processing with LaMa AI model..."))
+            self.root.after(0, lambda: self._update_status("正在使用 LaMa AI 模型处理..."))
             self._apply_lama_inpaint(mask)
             
         except Exception as e:
@@ -1160,7 +1258,7 @@ class WatermarkRemover:
     def _apply_lama_inpaint(self, mask):
         try:
             if self.simple_lama is None:
-                self.root.after(0, lambda: self._update_status("Loading LaMa model..."))
+                self.root.after(0, lambda: self._update_status("正在加载 LaMa 模型..."))
                 self.simple_lama = SimpleLama(device=torch.device(self.device))
             
             image_rgb = cv2.cvtColor(self.image, cv2.COLOR_BGR2RGB)
@@ -1182,7 +1280,7 @@ class WatermarkRemover:
         self.image = new_image
         self.image_list[self.current_image_index] = new_image
         self.roi_selected = False
-        self._refresh_display("Watermark removed! Click [Save] to save.")
+        self._refresh_display("水印已移除! 点击 [保存] 保存图片。")
     
     def _finish_batch_processing(self, success_count, fail_count):
         self.progress_bar.stop()
@@ -1196,21 +1294,21 @@ class WatermarkRemover:
         
         self._update_tabs()
         
-        msg = f"Batch complete: {success_count} succeeded, {fail_count} failed"
+        msg = f"批量完成: {success_count} 张成功, {fail_count} 张失败"
         self._update_display(msg)
     
     def _handle_error(self, error_msg):
         self.progress_bar.stop()
         self.progress_bar.pack_forget()
-        self._update_status(f"Error: {error_msg}")
+        self._update_status(f"错误: {error_msg}")
         
     def _save_image(self):
         if self.image is None:
-            self._update_status("No image to save!")
+            self._update_status("没有可保存的图片!")
             return
         
         if not self.image_paths or self.current_image_index >= len(self.image_paths):
-            self._update_status("No original path found!")
+            self._update_status("未找到原始路径!")
             return
         
         current_path = self.image_paths[self.current_image_index]
@@ -1225,15 +1323,15 @@ class WatermarkRemover:
                     cv2.imencode('.webp', self.image)[1].tofile(current_path)
                 else:
                     cv2.imencode('.png', self.image)[1].tofile(current_path)
-                self._update_status(f"Saved: {current_path}")
+                self._update_status(f"已保存: {current_path}")
             except Exception as e:
-                self._update_status(f"Failed to save: {str(e)}")
+                self._update_status(f"保存失败: {str(e)}")
         else:
-            self._update_status("No original path for this image!")
+            self._update_status("此图片没有原始路径!")
     
     def _batch_save_image(self):
         if not self.image_list:
-            self._update_status("No images to save!")
+            self._update_status("没有可保存的图片!")
             return
         
         saved_count = 0
@@ -1258,9 +1356,9 @@ class WatermarkRemover:
                 failed_count += 1
         
         if failed_count == 0:
-            self._update_status(f"Batch saved {saved_count} images to original locations")
+            self._update_status(f"已批量保存 {saved_count} 张图片到原位置")
         else:
-            self._update_status(f"Saved {saved_count}, failed {failed_count}")
+            self._update_status(f"保存 {saved_count} 张成功, {failed_count} 张失败")
             
     def _reset_image(self):
         if self.original_image_list:
@@ -1272,13 +1370,13 @@ class WatermarkRemover:
             self.roi_selected = False
             self.zoom_scale = 1.0
             
-            msg = f"Reset image {self.current_image_index + 1}/{len(self.image_list)}. "
+            msg = f"已重置图片 {self.current_image_index + 1}/{len(self.image_list)}。"
             if self.mode == "text":
-                msg += "Enter watermark text."
+                msg += "请输入水印文字。"
             elif self.mode == "image":
-                msg += "Load template and click Remove." if self.template_image is None else "Click Remove to find watermark."
+                msg += "加载模板后点击移除。" if self.template_image is None else "点击移除查找水印。"
             else:
-                msg += "Drag to select watermark area."
+                msg += "拖拽选择水印区域。"
             self._update_display(msg)
             
     def _update_display(self, message=""):
@@ -1317,9 +1415,9 @@ class WatermarkRemover:
         
         zoom_pct = int(self.zoom_scale * 100)
         if message:
-            self._update_status(f"{message} | Zoom: {zoom_pct}%")
+            self._update_status(f"{message} | 缩放: {zoom_pct}%")
         else:
-            self._update_status(f"Zoom: {zoom_pct}%")
+            self._update_status(f"缩放: {zoom_pct}%")
             
     def _update_status(self, message):
         self.status_text.config(text=message)
@@ -1344,7 +1442,7 @@ class WatermarkRemover:
         self.fx, self.fy = event.x, event.y
         self.roi_selected = True
         self._draw_selection()
-        self._update_status("Area selected. Click [Remove] to remove watermark.")
+        self._update_status("区域已选择。点击 [移除] 移除水印。")
         
     def _draw_selection(self):
         self.canvas.delete("selection")
@@ -1411,7 +1509,7 @@ class WatermarkRemover:
         
         self._redraw_image()
         zoom_pct = int(self.zoom_scale * 100)
-        self._update_status(f"Zoom: {zoom_pct}%")
+        self._update_status(f"缩放: {zoom_pct}%")
 
 if __name__ == "__main__":
     root = TkinterDnD.Tk()
