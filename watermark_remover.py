@@ -51,7 +51,7 @@ class WatermarkDetector:
             os.environ['REQUESTS_CA_BUNDLE'] = ''
             os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
             
-            from transformers import AutoModelForCausalLM, AutoProcessor
+            from transformers import AutoModelForVision2Seq, AutoProcessor
             model_name = "microsoft/Florence-2-large"
             
             last_error = None
@@ -64,7 +64,7 @@ class WatermarkDetector:
                         model_name, 
                         trust_remote_code=True
                     )
-                    self.florence_model = AutoModelForCausalLM.from_pretrained(
+                    self.florence_model = AutoModelForVision2Seq.from_pretrained(
                         model_name, 
                         trust_remote_code=True
                     ).to(self.device)
@@ -74,7 +74,22 @@ class WatermarkDetector:
                 except Exception as e:
                     last_error = e
                     print(f"Failed to load from {mirror}: {e}")
-                    continue
+                    try:
+                        from transformers import AutoModelForCausalLM
+                        self.florence_processor = AutoProcessor.from_pretrained(
+                            model_name, 
+                            trust_remote_code=True
+                        )
+                        self.florence_model = AutoModelForCausalLM.from_pretrained(
+                            model_name, 
+                            trust_remote_code=True
+                        ).to(self.device)
+                        self.florence_model.eval()
+                        print(f"Successfully loaded Florence-2 (fallback) from {mirror}")
+                        return self.florence_model, self.florence_processor
+                    except Exception as e2:
+                        print(f"Fallback also failed: {e2}")
+                        continue
             
             import traceback
             error_detail = traceback.format_exc()
@@ -119,6 +134,10 @@ class WatermarkDetector:
         text_regions = []
         img_h, img_w = img.shape[:2]
         
+        watermark_keywords = ["AI生成", "生成", "版权", "水印", "watermark", "logo", 
+                              "豆包", "文心", "通义", "智谱", "Kimi", "GPT", 
+                              "Claude", "copyright", "©", "原创", "作者"]
+        
         for detection in result:
             bbox = detection[0]
             text = detection[1]
@@ -154,6 +173,42 @@ class WatermarkDetector:
             max_dist = (img_w ** 2 + img_h ** 2) ** 0.5
             if corner_dist < max_dist * 0.3:
                 watermark_score += 0.3
+            
+            text_lower = text.lower()
+            keyword_matched = False
+            for kw in watermark_keywords:
+                if kw.lower() in text_lower:
+                    watermark_score += 0.4
+                    keyword_matched = True
+                    break
+            
+            text_len = len(text)
+            if 2 <= text_len <= 8:
+                watermark_score += 0.2
+            
+            if y2 > img_h * 0.85:
+                if x2 > img_w * 0.7:
+                    watermark_score += 0.15
+                elif x1 < img_w * 0.3:
+                    watermark_score += 0.15
+            elif y1 < img_h * 0.15:
+                if x2 > img_w * 0.7:
+                    watermark_score += 0.15
+                elif x1 < img_w * 0.3:
+                    watermark_score += 0.15
+            
+            is_year_or_date = False
+            clean_text = text.replace(" ", "").replace("-", "").replace("/", "")
+            if clean_text.isdigit():
+                if len(clean_text) == 4:
+                    year = int(clean_text)
+                    if 2000 <= year <= 2030:
+                        is_year_or_date = True
+                elif len(clean_text) in [6, 8]:
+                    is_year_or_date = True
+            
+            if is_year_or_date and not keyword_matched:
+                watermark_score -= 0.5
             
             is_likely_watermark = watermark_score >= 0.4
             
@@ -330,6 +385,94 @@ class WatermarkDetector:
             return {"success": True, "caption": caption}
         except Exception as e:
             return {"success": False, "caption": str(e)}
+    
+    def detect_from_array(self, img, return_caption=True):
+        result = {
+            "success": False,
+            "caption": "",
+            "watermark_info": None
+        }
+        
+        if img is None:
+            result["caption"] = "Image array is None"
+            return result
+        
+        img_h, img_w = img.shape[:2]
+        
+        try:
+            text_regions = self._analyze_text_regions(img)
+        except Exception as e:
+            text_regions = []
+        
+        watermark_candidates = [r for r in text_regions if r.get("is_watermark", False)]
+        
+        if return_caption:
+            try:
+                florence_caption = self._get_florence_caption(img)
+                result["caption"] = florence_caption
+            except Exception as e:
+                result["caption"] = f"Caption generation failed: {str(e)}"
+        
+        if watermark_candidates:
+            best = max(watermark_candidates, key=lambda x: x.get("watermark_score", 0))
+            
+            result["success"] = True
+            result["watermark_info"] = {
+                "type": "text",
+                "content": best["text"],
+                "location": best["location"],
+                "position": best["bbox"],
+                "confidence": best["watermark_score"]
+            }
+            
+            if return_caption:
+                all_watermark_texts = [r["text"] for r in watermark_candidates]
+                result["caption"] = f"Detected text watermark(s): {', '.join(all_watermark_texts)}. " + result["caption"]
+            
+            return result
+        
+        try:
+            logo_regions = self._analyze_image_for_logo(img)
+            if logo_regions:
+                best_logo = max(logo_regions, key=lambda x: x.get("confidence", 0))
+                
+                result["success"] = True
+                result["watermark_info"] = {
+                    "type": "image",
+                    "content": "logo/image watermark",
+                    "location": best_logo["location"],
+                    "position": best_logo["bbox"],
+                    "confidence": best_logo["confidence"]
+                }
+                
+                if return_caption:
+                    result["caption"] = f"Detected image/logo watermark at {best_logo['location']}. " + result["caption"]
+                
+                return result
+        except Exception:
+            pass
+        
+        if text_regions:
+            all_texts = [r["text"] for r in text_regions]
+            result["success"] = True
+            result["watermark_info"] = {
+                "type": "text",
+                "content": ", ".join(all_texts[:3]),
+                "location": text_regions[0]["location"],
+                "position": text_regions[0]["bbox"],
+                "confidence": 0.5
+            }
+            
+            if return_caption:
+                result["caption"] = f"Found text in image: {', '.join(all_texts)}. " + result["caption"]
+            
+            return result
+        
+        result["success"] = False
+        result["caption"] = "No watermark detected in the image. " + result.get("caption", "")
+        result["watermark_info"] = None
+        
+        return result
 
 class WatermarkRemover:
     def __init__(self, root):
@@ -525,6 +668,8 @@ class WatermarkRemover:
                         value="text", command=self._switch_mode, style="Mode.TRadiobutton").pack(side="left", padx=5)
         ttk.Radiobutton(mode_frame, text="图像", variable=self.mode_var, 
                         value="image", command=self._switch_mode, style="Mode.TRadiobutton").pack(side="left", padx=5)
+        ttk.Radiobutton(mode_frame, text="自动", variable=self.mode_var, 
+                        value="auto", command=self._switch_mode, style="Mode.TRadiobutton").pack(side="left", padx=5)
         
         self.text_frame = Frame(self.root, bg="#f5f5f5")
         Label(self.text_frame, text="水印文字:", bg="#f5f5f5", font=("Microsoft YaHei UI", 9)).pack(side="left", padx=5)
@@ -900,6 +1045,8 @@ class WatermarkRemover:
                 self._update_status("图像模式: 点击 [移除] 查找并移除水印")
             else:
                 self._update_status("图像模式: 请先加载模板图像")
+        elif self.mode == "auto":
+            self._update_status("自动模式: 点击 [移除] 自动检测并移除水印")
         else:
             self._update_status("框选模式: 拖拽选择水印区域")
         
@@ -1133,6 +1280,8 @@ class WatermarkRemover:
                 self._update_status("请输入水印文字!")
                 return
             self._start_text_removal(watermark_text)
+        elif self.mode == "auto":
+            self._start_auto_removal()
         else:
             if self.template_image is None:
                 self._update_status("请先加载模板图像!")
@@ -1149,7 +1298,7 @@ class WatermarkRemover:
             return
         
         if self.mode == "box":
-            self._update_status("框选模式不支持批量处理。请使用文字或图像模式。")
+            self._update_status("框选模式不支持批量处理。请使用文字、图像或自动模式。")
             return
         elif self.mode == "text":
             watermark_text = self.text_entry.get().strip()
@@ -1157,6 +1306,8 @@ class WatermarkRemover:
                 self._update_status("请输入水印文字!")
                 return
             self._start_batch_text_removal(watermark_text)
+        elif self.mode == "auto":
+            self._start_batch_auto_removal()
         else:
             if self.template_image is None:
                 self._update_status("请先加载模板图像!")
@@ -1187,6 +1338,14 @@ class WatermarkRemover:
         
         threading.Thread(target=self._process_image_in_background, daemon=True).start()
     
+    def _start_auto_removal(self):
+        self.progress_bar.pack(fill="x")
+        self.progress_bar.start(10)
+        self._update_status("正在自动检测水印...")
+        self.root.update()
+        
+        threading.Thread(target=self._process_auto_in_background, daemon=True).start()
+    
     def _start_batch_text_removal(self, watermark_text):
         self.batch_processing = True
         self.progress_bar.pack(fill="x")
@@ -1204,6 +1363,15 @@ class WatermarkRemover:
         self.root.update()
         
         threading.Thread(target=self._process_batch_image_in_background, daemon=True).start()
+    
+    def _start_batch_auto_removal(self):
+        self.batch_processing = True
+        self.progress_bar.pack(fill="x")
+        self.progress_bar.start(10)
+        self._update_status(f"批量处理: 0/{len(self.image_list)} 张图片...")
+        self.root.update()
+        
+        threading.Thread(target=self._process_batch_auto_in_background, daemon=True).start()
     
     def _process_box_in_background(self):
         try:
@@ -1471,6 +1639,103 @@ class WatermarkRemover:
             self.batch_processing = False
             self.root.after(0, lambda: self._handle_error(str(e)))
     
+    def _process_batch_auto_in_background(self):
+        try:
+            if self.simple_lama is None:
+                self.root.after(0, lambda: self._update_status("正在加载 LaMa 模型..."))
+                self.simple_lama = SimpleLama(device=torch.device(self.device))
+            
+            if self.ocr_reader is None:
+                self.root.after(0, lambda: self._update_status("正在加载 OCR 模型..."))
+                self.ocr_reader = RapidOCR()
+            
+            detector = WatermarkDetector(device=self.device)
+            
+            total = len(self.image_list)
+            success_count = 0
+            fail_count = 0
+            
+            for idx, img in enumerate(self.image_list):
+                self.current_image_index = idx
+                self.image = self.image_list[idx]
+                self.original_image = self.original_image_list[idx]
+                self.root.after(0, lambda i=idx: self._update_batch_display(i, total))
+                
+                try:
+                    detect_result = detector.detect_from_array(img, return_caption=False)
+                    
+                    if not detect_result.get("success"):
+                        fail_count += 1
+                        continue
+                    
+                    watermark_info = detect_result.get("watermark_info")
+                    if not watermark_info:
+                        fail_count += 1
+                        continue
+                    
+                    watermark_type = watermark_info.get("type", "text")
+                    content = watermark_info.get("content", "")
+                    position = watermark_info.get("position", [])
+                    
+                    mask = None
+                    
+                    if watermark_type == "text" and content:
+                        image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                        ocr_result, _ = self.ocr_reader(image_rgb)
+                        
+                        if ocr_result is not None and len(ocr_result) > 0:
+                            matched_boxes = []
+                            watermark_lower = content.lower().replace(" ", "").replace("AI", "ai")
+                            
+                            for detection in ocr_result:
+                                bbox = detection[0]
+                                text = detection[1]
+                                text_clean = text.lower().replace(" ", "").replace("AI", "ai")
+                                
+                                if watermark_lower in text_clean or text_clean in watermark_lower:
+                                    matched_boxes.append(bbox)
+                            
+                            if matched_boxes:
+                                mask = np.zeros(img.shape[:2], dtype=np.uint8)
+                                for bbox in matched_boxes:
+                                    pts = np.array(bbox, dtype=np.int32)
+                                    cv2.fillPoly(mask, [pts], 255)
+                    
+                    elif position and len(position) == 4:
+                        x1, y1, x2, y2 = position
+                        x1 = max(0, int(x1))
+                        y1 = max(0, int(y1))
+                        x2 = min(img.shape[1], int(x2))
+                        y2 = min(img.shape[0], int(y2))
+                        
+                        if x2 > x1 and y2 > y1:
+                            mask = np.zeros(img.shape[:2], dtype=np.uint8)
+                            cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+                    
+                    if mask is not None:
+                        image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                        image_pil = Image.fromarray(image_rgb)
+                        mask_pil = Image.fromarray(mask).convert("L")
+                        result_pil = self.simple_lama(image_pil, mask_pil)
+                        result_array = np.array(result_pil)
+                        new_image = cv2.cvtColor(result_array, cv2.COLOR_RGB2BGR)
+                        
+                        self.image_list[idx] = new_image
+                        success_count += 1
+                    else:
+                        fail_count += 1
+                
+                except Exception as e:
+                    fail_count += 1
+                    continue
+            
+            self.batch_processing = False
+            self.root.after(0, lambda: self._finish_batch_processing(success_count, fail_count))
+        
+        except Exception as e:
+            self.batch_processing = False
+            self.root.after(0, lambda: self._handle_error(str(e)))
+    
     def _process_image_in_background(self):
         try:
             self.root.after(0, lambda: self._update_status("正在执行并行多尺度模板匹配..."))
@@ -1573,6 +1838,101 @@ class WatermarkRemover:
             self.root.after(0, lambda: self._update_status("正在使用 LaMa AI 模型处理..."))
             self._apply_lama_inpaint(mask)
             
+        except Exception as e:
+            self.root.after(0, lambda: self._handle_error(str(e)))
+    
+    def _process_auto_in_background(self):
+        try:
+            self.root.after(0, lambda: self._update_status("正在检测水印..."))
+            
+            detector = WatermarkDetector(device=self.device)
+            detect_result = detector.detect_from_array(self.image, return_caption=False)
+            
+            if not detect_result.get("success"):
+                self.root.after(0, lambda: self._handle_error("未检测到水印"))
+                return
+            
+            watermark_info = detect_result.get("watermark_info")
+            if not watermark_info:
+                self.root.after(0, lambda: self._handle_error("未检测到水印"))
+                return
+            
+            watermark_type = watermark_info.get("type", "text")
+            content = watermark_info.get("content", "")
+            position = watermark_info.get("position", [])
+            
+            self.root.after(0, lambda c=content: self._update_status(f"检测到水印: {c}"))
+            
+            if watermark_type == "text" and content:
+                self._auto_remove_by_text(content)
+            elif position and len(position) == 4:
+                self._auto_remove_by_box(position)
+            else:
+                self.root.after(0, lambda: self._handle_error(f"无法处理检测到的水印类型: {watermark_type}"))
+        
+        except Exception as e:
+            self.root.after(0, lambda: self._handle_error(str(e)))
+    
+    def _auto_remove_by_text(self, watermark_text):
+        try:
+            if self.ocr_reader is None:
+                self.root.after(0, lambda: self._update_status("正在加载 OCR 模型..."))
+                self.ocr_reader = RapidOCR()
+            
+            self.root.after(0, lambda: self._update_status(f"正在查找文字: {watermark_text}"))
+            
+            image_rgb = cv2.cvtColor(self.image, cv2.COLOR_BGR2RGB)
+            result, _ = self.ocr_reader(image_rgb)
+            
+            if result is None or len(result) == 0:
+                self.root.after(0, lambda: self._handle_error("OCR未检测到任何文字"))
+                return
+            
+            matched_boxes = []
+            watermark_lower = watermark_text.lower().replace(" ", "").replace("AI", "ai")
+            
+            for detection in result:
+                bbox = detection[0]
+                text = detection[1]
+                text_clean = text.lower().replace(" ", "").replace("AI", "ai")
+                
+                if watermark_lower in text_clean or text_clean in watermark_lower:
+                    matched_boxes.append(bbox)
+            
+            if not matched_boxes:
+                self.root.after(0, lambda: self._handle_error(f"未找到匹配的文字: {watermark_text}"))
+                return
+            
+            mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
+            for bbox in matched_boxes:
+                pts = np.array(bbox, dtype=np.int32)
+                cv2.fillPoly(mask, [pts], 255)
+            
+            self.root.after(0, lambda: self._update_status("正在使用 LaMa AI 模型处理..."))
+            self._apply_lama_inpaint(mask)
+        
+        except Exception as e:
+            self.root.after(0, lambda: self._handle_error(str(e)))
+    
+    def _auto_remove_by_box(self, position):
+        try:
+            x1, y1, x2, y2 = position
+            
+            x1 = max(0, int(x1))
+            y1 = max(0, int(y1))
+            x2 = min(self.image.shape[1], int(x2))
+            y2 = min(self.image.shape[0], int(y2))
+            
+            if x2 <= x1 or y2 <= y1:
+                self.root.after(0, lambda: self._handle_error("检测到的区域无效"))
+                return
+            
+            mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
+            cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+            
+            self.root.after(0, lambda: self._update_status("正在使用 LaMa AI 模型处理..."))
+            self._apply_lama_inpaint(mask)
+        
         except Exception as e:
             self.root.after(0, lambda: self._handle_error(str(e)))
     
@@ -2064,6 +2424,60 @@ class WatermarkRemoverCLI:
         
         return result
     
+    def auto_remove(self, image_path, output_path=None, return_caption=False):
+        result = {
+            "success": False,
+            "mode_used": None,
+            "detect_result": None,
+            "remove_result": None
+        }
+        
+        detector = WatermarkDetector(device=self.device)
+        
+        detect_result = detector.detect(image_path, return_caption=return_caption)
+        result["detect_result"] = detect_result
+        
+        if not detect_result.get("success"):
+            result["message"] = "水印检测失败: " + detect_result.get("caption", "未知错误")
+            return result
+        
+        watermark_info = detect_result.get("watermark_info")
+        if not watermark_info:
+            result["message"] = "未检测到水印"
+            return result
+        
+        watermark_type = watermark_info.get("type", "text")
+        content = watermark_info.get("content", "")
+        position = watermark_info.get("position", [])
+        
+        if watermark_type == "text" and content:
+            result["mode_used"] = "text"
+            remove_result = self.remove_by_text(image_path, content, output_path)
+        
+        elif watermark_type == "image" and position:
+            result["mode_used"] = "box"
+            coords = ",".join(map(str, position))
+            remove_result = self.remove_by_box(image_path, coords, output_path)
+        
+        elif position and len(position) == 4:
+            result["mode_used"] = "box"
+            coords = ",".join(map(str, position))
+            remove_result = self.remove_by_box(image_path, coords, output_path)
+        
+        else:
+            result["message"] = f"无法确定去除模式: type={watermark_type}, content={content}"
+            return result
+        
+        result["remove_result"] = remove_result
+        result["success"] = remove_result.get("success", False)
+        
+        if result["success"]:
+            result["message"] = f"自动去除成功 (模式: {result['mode_used']})"
+        else:
+            result["message"] = f"去除失败: {remove_result.get('message', '未知错误')}"
+        
+        return result
+    
     def process_batch(self, input_path, mode, text=None, template_path=None, coords=None, threshold=0.3, output_dir=None):
         results = []
         
@@ -2093,6 +2507,8 @@ class WatermarkRemoverCLI:
                 res = self.remove_by_template(img_path, template_path, output_path, threshold)
             elif mode == "box":
                 res = self.remove_by_box(img_path, coords, output_path)
+            elif mode == "auto":
+                res = self.auto_remove(img_path, output_path)
             else:
                 res = {"success": False, "message": f"未知模式: {mode}"}
             
@@ -2110,10 +2526,11 @@ def create_api_app():
     def index():
         return jsonify({
             "name": "水印去除工具 API",
-            "version": "1.1.0",
+            "version": "1.2.0",
             "endpoints": {
                 "/detect": "POST - 检测水印",
                 "/remove": "POST - 移除水印",
+                "/auto": "POST - 自动检测并移除水印",
                 "/batch": "POST - 批量处理",
                 "/status": "GET - 服务状态"
             }
@@ -2148,6 +2565,26 @@ def create_api_app():
         return_caption = data.get('return_caption', True)
         
         result = detector.detect(image_path, return_caption=return_caption)
+        return jsonify(result)
+    
+    @app.route('/auto', methods=['POST'])
+    def auto():
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"success": False, "message": "请求体必须是JSON格式"}), 400
+        
+        image_path = data.get('image')
+        if not image_path:
+            return jsonify({"success": False, "message": "缺少 image 参数"}), 400
+        
+        if not os.path.exists(image_path):
+            return jsonify({"success": False, "message": f"图片文件不存在: {image_path}"}), 404
+        
+        output_path = data.get('output')
+        return_caption = data.get('return_caption', False)
+        
+        result = cli.auto_remove(image_path, output_path, return_caption)
         return jsonify(result)
     
     @app.route('/remove', methods=['POST'])
@@ -2257,6 +2694,7 @@ def main_api(port=8080, host='127.0.0.1'):
     print(f"  GET  /status  - 服务状态")
     print(f"  POST /detect  - 检测水印")
     print(f"  POST /remove  - 移除水印")
+    print(f"  POST /auto    - 自动检测并移除水印")
     print(f"  POST /batch   - 批量处理")
     print(f"按 Ctrl+C 停止服务")
     app.run(host=host, port=port, debug=False)
@@ -2284,6 +2722,12 @@ def main():
     detect_parser.add_argument("--no-caption", action="store_true", help="不生成图片描述(更快)")
     detect_parser.add_argument("--json", "-j", action="store_true", help="以JSON格式输出结果")
     
+    auto_parser = subparsers.add_parser('auto', help='自动检测并移除水印')
+    auto_parser.add_argument("--input", "-i", required=True, help="输入图片路径")
+    auto_parser.add_argument("--output", "-o", help="输出图片路径")
+    auto_parser.add_argument("--json", "-j", action="store_true", help="以JSON格式输出结果")
+    auto_parser.add_argument("--no-caption", action="store_true", help="不生成图片描述(更快)")
+    
     cli_parser = subparsers.add_parser('cli', help='命令行模式')
     cli_parser.add_argument("--input", "-i", required=True, help="输入图片路径或目录")
     cli_parser.add_argument("--mode", "-m", choices=["text", "image", "box"], default="text", help="去除模式")
@@ -2302,6 +2746,8 @@ def main():
         main_api(port=args.port, host=args.host)
     elif args.command == 'detect':
         run_detect(args)
+    elif args.command == 'auto':
+        run_auto(args)
     elif args.command == 'cli':
         run_cli(args)
     else:
@@ -2335,6 +2781,26 @@ def run_detect(args):
             print(f"未检测到水印")
             if result.get("caption"):
                 print(f"图片描述: {result['caption']}")
+
+def run_auto(args):
+    cli = WatermarkRemoverCLI()
+    result = cli.auto_remove(args.input, args.output, return_caption=not args.no_caption)
+    
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        if result["success"]:
+            print(f"成功: {result['message']}")
+            if result.get("mode_used"):
+                print(f"使用模式: {result['mode_used']}")
+            if result.get("remove_result", {}).get("output_path"):
+                print(f"输出: {result['remove_result']['output_path']}")
+        else:
+            print(f"失败: {result.get('message', '未知错误')}")
+            if result.get("detect_result", {}).get("success"):
+                info = result["detect_result"].get("watermark_info", {})
+                if info:
+                    print(f"检测到水印但去除失败: {info.get('content', '')}")
 
 def run_cli(args):
     if args.mode == "text" and not args.text:
