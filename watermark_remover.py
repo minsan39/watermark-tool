@@ -6,11 +6,15 @@ from PIL import Image, ImageTk
 from simple_lama_inpainting import SimpleLama
 import threading
 from rapidocr_onnxruntime import RapidOCR
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import torch
 
 class WatermarkRemover:
     def __init__(self, root):
         self.root = root
         self.root.title("Watermark Remover")
+        
+        self.device = self._detect_device()
         
         self.image = None
         self.original_image = None
@@ -42,6 +46,15 @@ class WatermarkRemover:
         self.batch_processing = False
         
         self._setup_ui()
+    
+    def _detect_device(self):
+        if torch.cuda.is_available():
+            device_name = torch.cuda.get_device_name(0)
+            print(f"GPU detected: {device_name}")
+            return "cuda"
+        else:
+            print("No GPU detected, using CPU")
+            return "cpu"
         
     def _setup_ui(self):
         btn_frame = Frame(self.root)
@@ -443,7 +456,7 @@ class WatermarkRemover:
         try:
             if self.simple_lama is None:
                 self.root.after(0, lambda: self._update_status("Loading LaMa model (first time will download ~200MB)..."))
-                self.simple_lama = SimpleLama()
+                self.simple_lama = SimpleLama(device=torch.device(self.device))
                 self.root.after(0, lambda: self._update_status("Processing with LaMa AI model..."))
                 
             real_ix = int((self.ix - self.offset_x) / (self.base_scale * self.zoom_scale))
@@ -518,7 +531,7 @@ class WatermarkRemover:
             
             if self.simple_lama is None:
                 self.root.after(0, lambda: self._update_status("Loading LaMa model..."))
-                self.simple_lama = SimpleLama()
+                self.simple_lama = SimpleLama(device=torch.device(self.device))
             
             total = len(self.image_list)
             success_count = 0
@@ -581,24 +594,21 @@ class WatermarkRemover:
         try:
             if self.simple_lama is None:
                 self.root.after(0, lambda: self._update_status("Loading LaMa model..."))
-                self.simple_lama = SimpleLama()
+                self.simple_lama = SimpleLama(device=torch.device(self.device))
             
             template = self.template_image
             template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
             template_edges = cv2.Canny(template_gray, 50, 150)
+            
+            gx = cv2.Sobel(template_gray, cv2.CV_32F, 1, 0, ksize=3)
+            gy = cv2.Sobel(template_gray, cv2.CV_32F, 0, 1, ksize=3)
+            template_grad = cv2.phase(gx, gy, angleInDegrees=True)
             
             try:
                 threshold = float(self.threshold_var.get())
             except:
                 threshold = 0.3
             
-            def compute_gradient_direction(img):
-                gx = cv2.Sobel(img, cv2.CV_32F, 1, 0, ksize=3)
-                gy = cv2.Sobel(img, cv2.CV_32F, 0, 1, ksize=3)
-                angle = cv2.phase(gx, gy, angleInDegrees=True)
-                return angle
-            
-            template_grad = compute_gradient_direction(template_gray)
             scales = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.5, 1.8, 2.0, 2.5, 3.0]
             
             total = len(self.image_list)
@@ -614,33 +624,55 @@ class WatermarkRemover:
                 try:
                     img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                     img_edges = cv2.Canny(img_gray, 50, 150)
-                    img_grad = compute_gradient_direction(img_gray)
+                    
+                    gx_img = cv2.Sobel(img_gray, cv2.CV_32F, 1, 0, ksize=3)
+                    gy_img = cv2.Sobel(img_gray, cv2.CV_32F, 0, 1, ksize=3)
+                    img_grad = cv2.phase(gx_img, gy_img, angleInDegrees=True)
+                    
+                    img_h, img_w = img_gray.shape
+                    
+                    scaled_templates = {}
+                    for scale in scales:
+                        interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC
+                        t_gray = cv2.resize(template_gray, None, fx=scale, fy=scale, interpolation=interp)
+                        t_edges = cv2.resize(template_edges, None, fx=scale, fy=scale, interpolation=interp)
+                        t_grad = cv2.resize(template_grad, None, fx=scale, fy=scale, interpolation=interp)
+                        sth, stw = t_gray.shape[:2]
+                        if sth < img_h and stw < img_w:
+                            scaled_templates[scale] = (t_gray, t_edges, t_grad, sth, stw)
+                    
+                    def match_at_scale(scale_data):
+                        scale, (t_gray, t_edges, t_grad, sth, stw) = scale_data
+                        results = []
+                        
+                        result_gray = cv2.matchTemplate(img_gray, t_gray, cv2.TM_CCOEFF_NORMED)
+                        result_edges = cv2.matchTemplate(img_edges, t_edges, cv2.TM_CCOEFF_NORMED)
+                        result_grad = cv2.matchTemplate(img_grad, t_grad, cv2.TM_CCOEFF_NORMED)
+                        
+                        result_combined = np.maximum(result_gray, np.maximum(result_edges, result_grad))
+                        max_val = np.max(result_combined)
+                        
+                        if max_val >= threshold:
+                            loc = np.where(result_combined >= threshold)
+                            for pt in zip(*loc[::-1]):
+                                score = result_combined[pt[1], pt[0]]
+                                results.append((pt[0], pt[1], pt[0] + stw, pt[1] + sth, score))
+                        
+                        return max_val, results
                     
                     matched_regions = []
                     best_score = 0.0
                     
-                    for scale in scales:
-                        scaled_template = cv2.resize(template_gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
-                        scaled_edges = cv2.resize(template_edges, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
-                        scaled_grad = cv2.resize(template_grad, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
-                        sth, stw = scaled_template.shape[:2]
-                        
-                        if sth >= img_gray.shape[0] or stw >= img_gray.shape[1]:
-                            continue
-                        
-                        result_gray = cv2.matchTemplate(img_gray, scaled_template, cv2.TM_CCOEFF_NORMED)
-                        result_edges = cv2.matchTemplate(img_edges, scaled_edges, cv2.TM_CCOEFF_NORMED)
-                        result_grad = cv2.matchTemplate(img_grad, scaled_grad, cv2.TM_CCOEFF_NORMED)
-                        result_combined = np.maximum(result_gray, np.maximum(result_edges, result_grad))
-                        
-                        max_val = np.max(result_combined)
-                        if max_val > best_score:
-                            best_score = max_val
-                        
-                        loc = np.where(result_combined >= threshold)
-                        for pt in zip(*loc[::-1]):
-                            score = result_combined[pt[1], pt[0]]
-                            matched_regions.append((pt[0], pt[1], pt[0] + stw, pt[1] + sth, score))
+                    with ThreadPoolExecutor(max_workers=4) as executor:
+                        futures = {executor.submit(match_at_scale, (s, t)): s for s, t in scaled_templates.items()}
+                        for future in as_completed(futures):
+                            try:
+                                max_val, regions = future.result()
+                                if max_val > best_score:
+                                    best_score = max_val
+                                matched_regions.extend(regions)
+                            except Exception:
+                                pass
                     
                     if not matched_regions:
                         fail_count += 1
@@ -688,62 +720,75 @@ class WatermarkRemover:
     
     def _process_image_in_background(self):
         try:
-            self.root.after(0, lambda: self._update_status("Performing multi-scale template matching..."))
+            self.root.after(0, lambda: self._update_status("Performing parallel multi-scale template matching..."))
             
             template = self.template_image
             img = self.image
             
             template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-            img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            
             template_edges = cv2.Canny(template_gray, 50, 150)
+            img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             img_edges = cv2.Canny(img_gray, 50, 150)
             
-            th, tw = template_gray.shape[:2]
+            gx = cv2.Sobel(template_gray, cv2.CV_32F, 1, 0, ksize=3)
+            gy = cv2.Sobel(template_gray, cv2.CV_32F, 0, 1, ksize=3)
+            template_grad = cv2.phase(gx, gy, angleInDegrees=True)
+            
+            gx_img = cv2.Sobel(img_gray, cv2.CV_32F, 1, 0, ksize=3)
+            gy_img = cv2.Sobel(img_gray, cv2.CV_32F, 0, 1, ksize=3)
+            img_grad = cv2.phase(gx_img, gy_img, angleInDegrees=True)
             
             try:
                 threshold = float(self.threshold_var.get())
             except:
                 threshold = 0.3
             
-            def compute_gradient_direction(img):
-                gx = cv2.Sobel(img, cv2.CV_32F, 1, 0, ksize=3)
-                gy = cv2.Sobel(img, cv2.CV_32F, 0, 1, ksize=3)
-                angle = cv2.phase(gx, gy, angleInDegrees=True)
-                return angle
-            
-            template_grad = compute_gradient_direction(template_gray)
-            img_grad = compute_gradient_direction(img_gray)
-            
             scales = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.5, 1.8, 2.0, 2.5, 3.0]
+            
+            img_h, img_w = img_gray.shape
+            
+            scaled_templates = {}
+            for scale in scales:
+                interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC
+                t_gray = cv2.resize(template_gray, None, fx=scale, fy=scale, interpolation=interp)
+                t_edges = cv2.resize(template_edges, None, fx=scale, fy=scale, interpolation=interp)
+                t_grad = cv2.resize(template_grad, None, fx=scale, fy=scale, interpolation=interp)
+                sth, stw = t_gray.shape[:2]
+                if sth < img_h and stw < img_w:
+                    scaled_templates[scale] = (t_gray, t_edges, t_grad, sth, stw)
+            
+            def match_at_scale(scale_data):
+                scale, (t_gray, t_edges, t_grad, sth, stw) = scale_data
+                results = []
+                
+                result_gray = cv2.matchTemplate(img_gray, t_gray, cv2.TM_CCOEFF_NORMED)
+                result_edges = cv2.matchTemplate(img_edges, t_edges, cv2.TM_CCOEFF_NORMED)
+                result_grad = cv2.matchTemplate(img_grad, t_grad, cv2.TM_CCOEFF_NORMED)
+                
+                result_combined = np.maximum(result_gray, np.maximum(result_edges, result_grad))
+                max_val = np.max(result_combined)
+                
+                if max_val >= threshold:
+                    loc = np.where(result_combined >= threshold)
+                    for pt in zip(*loc[::-1]):
+                        score = result_combined[pt[1], pt[0]]
+                        results.append((pt[0], pt[1], pt[0] + stw, pt[1] + sth, score))
+                
+                return max_val, results
             
             matched_regions = []
             best_score = 0.0
             
-            for scale in scales:
-                scaled_template = cv2.resize(template_gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
-                scaled_edges = cv2.resize(template_edges, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
-                scaled_grad = cv2.resize(template_grad, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
-                sth, stw = scaled_template.shape[:2]
-                
-                if sth >= img_gray.shape[0] or stw >= img_gray.shape[1]:
-                    continue
-                
-                result_gray = cv2.matchTemplate(img_gray, scaled_template, cv2.TM_CCOEFF_NORMED)
-                result_edges = cv2.matchTemplate(img_edges, scaled_edges, cv2.TM_CCOEFF_NORMED)
-                result_grad = cv2.matchTemplate(img_grad, scaled_grad, cv2.TM_CCOEFF_NORMED)
-                
-                result_combined = np.maximum(result_gray, np.maximum(result_edges, result_grad))
-                
-                max_val = np.max(result_combined)
-                if max_val > best_score:
-                    best_score = max_val
-                
-                loc = np.where(result_combined >= threshold)
-                
-                for pt in zip(*loc[::-1]):
-                    score = result_combined[pt[1], pt[0]]
-                    matched_regions.append((pt[0], pt[1], pt[0] + stw, pt[1] + sth, score))
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {executor.submit(match_at_scale, (s, t)): s for s, t in scaled_templates.items()}
+                for future in as_completed(futures):
+                    try:
+                        max_val, regions = future.result()
+                        if max_val > best_score:
+                            best_score = max_val
+                        matched_regions.extend(regions)
+                    except Exception:
+                        pass
             
             if not matched_regions:
                 msg = f"Best match score: {best_score:.2f}. Threshold: {threshold:.2f}. Try lowering threshold."
@@ -782,7 +827,7 @@ class WatermarkRemover:
         try:
             if self.simple_lama is None:
                 self.root.after(0, lambda: self._update_status("Loading LaMa model..."))
-                self.simple_lama = SimpleLama()
+                self.simple_lama = SimpleLama(device=torch.device(self.device))
             
             image_rgb = cv2.cvtColor(self.image, cv2.COLOR_BGR2RGB)
             image_pil = Image.fromarray(image_rgb)
