@@ -14,6 +14,7 @@ import json
 import sys
 import os
 import glob
+from flask import Flask, request, jsonify
 
 class WatermarkRemover:
     def __init__(self, root):
@@ -1785,42 +1786,183 @@ class WatermarkRemoverCLI:
         
         return results
 
-def main_cli():
+def create_api_app():
+    app = Flask(__name__)
+    cli = WatermarkRemoverCLI()
+    
+    @app.route('/', methods=['GET'])
+    def index():
+        return jsonify({
+            "name": "水印去除工具 API",
+            "version": "1.0.0",
+            "endpoints": {
+                "/remove": "POST - 移除水印",
+                "/batch": "POST - 批量处理",
+                "/status": "GET - 服务状态"
+            }
+        })
+    
+    @app.route('/status', methods=['GET'])
+    def status():
+        return jsonify({
+            "status": "running",
+            "device": cli.device,
+            "models_loaded": {
+                "lama": cli.simple_lama is not None,
+                "ocr": cli.ocr_reader is not None
+            }
+        })
+    
+    @app.route('/remove', methods=['POST'])
+    def remove():
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"success": False, "message": "请求体必须是JSON格式"}), 400
+        
+        image_path = data.get('image')
+        if not image_path:
+            return jsonify({"success": False, "message": "缺少 image 参数"}), 400
+        
+        if not os.path.exists(image_path):
+            return jsonify({"success": False, "message": f"图片文件不存在: {image_path}"}), 404
+        
+        mode = data.get('mode', 'text')
+        output_path = data.get('output')
+        
+        if mode == 'text':
+            text = data.get('text')
+            if not text:
+                return jsonify({"success": False, "message": "text模式需要 text 参数"}), 400
+            result = cli.remove_by_text(image_path, text, output_path)
+        
+        elif mode == 'image':
+            template_path = data.get('template')
+            if not template_path:
+                return jsonify({"success": False, "message": "image模式需要 template 参数"}), 400
+            if not os.path.exists(template_path):
+                return jsonify({"success": False, "message": f"模板文件不存在: {template_path}"}), 404
+            threshold = data.get('threshold', 0.3)
+            result = cli.remove_by_template(image_path, template_path, output_path, threshold)
+        
+        elif mode == 'box':
+            coords = data.get('coords')
+            if not coords:
+                return jsonify({"success": False, "message": "box模式需要 coords 参数"}), 400
+            if isinstance(coords, list):
+                coords = ','.join(map(str, coords))
+            result = cli.remove_by_box(image_path, coords, output_path)
+        
+        else:
+            return jsonify({"success": False, "message": f"未知模式: {mode}"}), 400
+        
+        return jsonify(result)
+    
+    @app.route('/batch', methods=['POST'])
+    def batch():
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"success": False, "message": "请求体必须是JSON格式"}), 400
+        
+        input_path = data.get('input')
+        if not input_path:
+            return jsonify({"success": False, "message": "缺少 input 参数"}), 400
+        
+        if not os.path.exists(input_path):
+            return jsonify({"success": False, "message": f"输入路径不存在: {input_path}"}), 404
+        
+        mode = data.get('mode', 'text')
+        output_dir = data.get('output_dir')
+        threshold = data.get('threshold', 0.3)
+        
+        if mode == 'text':
+            text = data.get('text')
+            if not text:
+                return jsonify({"success": False, "message": "text模式需要 text 参数"}), 400
+            results = cli.process_batch(input_path, mode, text=text, output_dir=output_dir)
+        
+        elif mode == 'image':
+            template_path = data.get('template')
+            if not template_path:
+                return jsonify({"success": False, "message": "image模式需要 template 参数"}), 400
+            if not os.path.exists(template_path):
+                return jsonify({"success": False, "message": f"模板文件不存在: {template_path}"}), 404
+            results = cli.process_batch(input_path, mode, template_path=template_path, 
+                                       threshold=threshold, output_dir=output_dir)
+        
+        elif mode == 'box':
+            coords = data.get('coords')
+            if not coords:
+                return jsonify({"success": False, "message": "box模式需要 coords 参数"}), 400
+            if isinstance(coords, list):
+                coords = ','.join(map(str, coords))
+            results = cli.process_batch(input_path, mode, coords=coords, output_dir=output_dir)
+        
+        else:
+            return jsonify({"success": False, "message": f"未知模式: {mode}"}), 400
+        
+        success_count = sum(1 for r in results if r.get('success'))
+        return jsonify({
+            "total": len(results),
+            "success": success_count,
+            "failed": len(results) - success_count,
+            "results": results
+        })
+    
+    return app
+
+def main_api(port=8080, host='127.0.0.1'):
+    app = create_api_app()
+    print(f"水印去除工具 API 服务启动")
+    print(f"地址: http://{host}:{port}")
+    print(f"端点:")
+    print(f"  GET  /status  - 服务状态")
+    print(f"  POST /remove  - 移除水印")
+    print(f"  POST /batch   - 批量处理")
+    print(f"按 Ctrl+C 停止服务")
+    app.run(host=host, port=port, debug=False)
+
+def main():
     parser = argparse.ArgumentParser(
-        description="水印去除工具 - AI调用接口",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-示例:
-  # 文字模式 - 移除指定文字水印
-  python watermark_remover.py --input image.jpg --mode text --text "Sample"
-  
-  # 图像模板模式 - 移除模板匹配的水印
-  python watermark_remover.py --input image.jpg --mode image --template logo.png
-  
-  # 框选模式 - 移除指定坐标区域
-  python watermark_remover.py --input image.jpg --mode box --coords "100,100,200,50"
-  
-  # 批量处理
-  python watermark_remover.py --input ./images/ --mode text --text "水印" --batch
-  
-  # 指定输出路径
-  python watermark_remover.py --input image.jpg --mode text --text "水印" --output result.jpg
-        """
+        description="水印去除工具",
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
-    parser.add_argument("--input", "-i", required=True, help="输入图片路径或目录")
-    parser.add_argument("--mode", "-m", choices=["text", "image", "box"], default="text", help="去除模式: text(文字), image(模板), box(坐标)")
-    parser.add_argument("--text", "-t", help="水印文字 (text模式必需)")
-    parser.add_argument("--template", "-tp", help="模板图片路径 (image模式必需)")
-    parser.add_argument("--coords", "-c", help="坐标区域 x1,y1,x2,y2 (box模式必需)")
-    parser.add_argument("--output", "-o", help="输出图片路径")
-    parser.add_argument("--output-dir", "-od", help="批量处理输出目录")
-    parser.add_argument("--threshold", "-th", type=float, default=0.3, help="模板匹配阈值 (0.1-0.9, 默认0.3)")
-    parser.add_argument("--batch", "-b", action="store_true", help="批量处理模式")
-    parser.add_argument("--json", "-j", action="store_true", help="以JSON格式输出结果")
+    subparsers = parser.add_subparsers(dest='command', help='运行模式')
+    
+    api_parser = subparsers.add_parser('api', help='启动API服务')
+    api_parser.add_argument('--port', '-p', type=int, default=8080, help='API服务端口 (默认: 8080)')
+    api_parser.add_argument('--host', default='127.0.0.1', help='API服务地址 (默认: 127.0.0.1)')
+    
+    cli_parser = subparsers.add_parser('cli', help='命令行模式')
+    cli_parser.add_argument("--input", "-i", required=True, help="输入图片路径或目录")
+    cli_parser.add_argument("--mode", "-m", choices=["text", "image", "box"], default="text", help="去除模式")
+    cli_parser.add_argument("--text", "-t", help="水印文字 (text模式必需)")
+    cli_parser.add_argument("--template", "-tp", help="模板图片路径 (image模式必需)")
+    cli_parser.add_argument("--coords", "-c", help="坐标区域 x1,y1,x2,y2 (box模式必需)")
+    cli_parser.add_argument("--output", "-o", help="输出图片路径")
+    cli_parser.add_argument("--output-dir", "-od", help="批量处理输出目录")
+    cli_parser.add_argument("--threshold", "-th", type=float, default=0.3, help="模板匹配阈值")
+    cli_parser.add_argument("--batch", "-b", action="store_true", help="批量处理模式")
+    cli_parser.add_argument("--json", "-j", action="store_true", help="以JSON格式输出结果")
     
     args = parser.parse_args()
     
+    if args.command == 'api':
+        main_api(port=args.port, host=args.host)
+    elif args.command == 'cli':
+        run_cli(args)
+    else:
+        try:
+            import tkinter
+            root = TkinterDnD.Tk()
+            app = WatermarkRemover(root)
+            root.mainloop()
+        except ImportError:
+            parser.print_help()
+
+def run_cli(args):
     if args.mode == "text" and not args.text:
         error = {"success": False, "message": "text模式需要指定 --text 参数"}
         print(json.dumps(error, ensure_ascii=False))
@@ -1874,9 +2016,4 @@ def main_cli():
                 print(f"失败: {result['message']}")
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        main_cli()
-    else:
-        root = TkinterDnD.Tk()
-        app = WatermarkRemover(root)
-        root.mainloop()
+    main()
