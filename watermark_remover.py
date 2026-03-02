@@ -51,8 +51,23 @@ class WatermarkDetector:
             os.environ['REQUESTS_CA_BUNDLE'] = ''
             os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
             
-            from transformers import AutoModelForVision2Seq, AutoProcessor
+            from transformers import AutoProcessor
             model_name = "microsoft/Florence-2-large"
+            
+            AutoModelClass = None
+            try:
+                from transformers import AutoModelForVision2Seq
+                AutoModelClass = AutoModelForVision2Seq
+                print("Using AutoModelForVision2Seq")
+            except ImportError:
+                try:
+                    from transformers import AutoModelForCausalLM
+                    AutoModelClass = AutoModelForCausalLM
+                    print("Using AutoModelForCausalLM (fallback)")
+                except ImportError:
+                    from transformers import AutoModel
+                    AutoModelClass = AutoModel
+                    print("Using AutoModel (fallback)")
             
             last_error = None
             for mirror in HF_MIRRORS:
@@ -64,7 +79,7 @@ class WatermarkDetector:
                         model_name, 
                         trust_remote_code=True
                     )
-                    self.florence_model = AutoModelForVision2Seq.from_pretrained(
+                    self.florence_model = AutoModelClass.from_pretrained(
                         model_name, 
                         trust_remote_code=True
                     ).to(self.device)
@@ -74,22 +89,7 @@ class WatermarkDetector:
                 except Exception as e:
                     last_error = e
                     print(f"Failed to load from {mirror}: {e}")
-                    try:
-                        from transformers import AutoModelForCausalLM
-                        self.florence_processor = AutoProcessor.from_pretrained(
-                            model_name, 
-                            trust_remote_code=True
-                        )
-                        self.florence_model = AutoModelForCausalLM.from_pretrained(
-                            model_name, 
-                            trust_remote_code=True
-                        ).to(self.device)
-                        self.florence_model.eval()
-                        print(f"Successfully loaded Florence-2 (fallback) from {mirror}")
-                        return self.florence_model, self.florence_processor
-                    except Exception as e2:
-                        print(f"Fallback also failed: {e2}")
-                        continue
+                    continue
             
             import traceback
             error_detail = traceback.format_exc()
