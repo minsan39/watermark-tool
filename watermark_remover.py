@@ -1,3 +1,21 @@
+import ssl
+import os
+import sys
+
+if hasattr(ssl, '_create_unverified_context'):
+    ssl._create_default_https_context = ssl._create_unverified_context
+
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['REQUESTS_CA_BUNDLE'] = ''
+os.environ['HF_HUB_DISABLE_SSL_VERIFY'] = '1'
+os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
+
+HF_MIRRORS = [
+    "https://hf-mirror.com",
+    "https://huggingface.co",
+]
+os.environ['HF_ENDPOINT'] = HF_MIRRORS[0]
+
 import cv2
 import numpy as np
 from tkinter import filedialog, Button, Canvas, Frame, Label, Entry, StringVar, Toplevel
@@ -11,10 +29,307 @@ import torch
 from tkinterdnd2 import TkinterDnD, DND_FILES
 import argparse
 import json
-import sys
-import os
 import glob
 from flask import Flask, request, jsonify
+import re
+
+class WatermarkDetector:
+    def __init__(self, device=None):
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.florence_model = None
+        self.florence_processor = None
+        self.ocr_reader = None
+    
+    def _load_florence(self):
+        if self.florence_model is None:
+            import ssl
+            if hasattr(ssl, '_create_unverified_context'):
+                ssl._create_default_https_context = ssl._create_unverified_context
+            
+            os.environ['HF_HUB_DISABLE_SSL_VERIFY'] = '1'
+            os.environ['CURL_CA_BUNDLE'] = ''
+            os.environ['REQUESTS_CA_BUNDLE'] = ''
+            os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
+            
+            from transformers import AutoModelForCausalLM, AutoProcessor
+            model_name = "microsoft/Florence-2-large"
+            
+            last_error = None
+            for mirror in HF_MIRRORS:
+                try:
+                    os.environ['HF_ENDPOINT'] = mirror
+                    print(f"Trying to load Florence-2 from {mirror}...")
+                    
+                    self.florence_processor = AutoProcessor.from_pretrained(
+                        model_name, 
+                        trust_remote_code=True
+                    )
+                    self.florence_model = AutoModelForCausalLM.from_pretrained(
+                        model_name, 
+                        trust_remote_code=True
+                    ).to(self.device)
+                    self.florence_model.eval()
+                    print(f"Successfully loaded Florence-2 from {mirror}")
+                    return self.florence_model, self.florence_processor
+                except Exception as e:
+                    last_error = e
+                    print(f"Failed to load from {mirror}: {e}")
+                    continue
+            
+            import traceback
+            error_detail = traceback.format_exc()
+            raise RuntimeError(f"Failed to load Florence-2 model from all mirrors. Last error: {last_error}\n{error_detail}")
+        return self.florence_model, self.florence_processor
+    
+    def _load_ocr(self):
+        if self.ocr_reader is None:
+            self.ocr_reader = RapidOCR()
+        return self.ocr_reader
+    
+    def _load_image(self, path):
+        try:
+            with open(path, 'rb') as f:
+                img_array = np.frombuffer(f.read(), dtype=np.uint8)
+            img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            return img
+        except Exception:
+            return None
+    
+    def _get_location_name(self, x1, y1, x2, y2, img_w, img_h):
+        center_x = (x1 + x2) / 2
+        center_y = (y1 + y2) / 2
+        rel_x = center_x / img_w
+        rel_y = center_y / img_h
+        
+        horizontal = "left" if rel_x < 0.33 else "right" if rel_x > 0.67 else "center"
+        vertical = "top" if rel_y < 0.33 else "bottom" if rel_y > 0.67 else "middle"
+        
+        if horizontal == "center" and vertical == "middle":
+            return "center"
+        return f"{vertical}-{horizontal}"
+    
+    def _analyze_text_regions(self, img):
+        ocr = self._load_ocr()
+        image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        result, _ = ocr(image_rgb)
+        
+        if result is None or len(result) == 0:
+            return []
+        
+        text_regions = []
+        img_h, img_w = img.shape[:2]
+        
+        for detection in result:
+            bbox = detection[0]
+            text = detection[1]
+            confidence = detection[2] if len(detection) > 2 else 1.0
+            
+            x_coords = [p[0] for p in bbox]
+            y_coords = [p[1] for p in bbox]
+            x1, x2 = min(x_coords), max(x_coords)
+            y1, y2 = min(y_coords), max(y_coords)
+            
+            region_area = (x2 - x1) * (y2 - y1)
+            img_area = img_w * img_h
+            area_ratio = region_area / img_area
+            
+            is_likely_watermark = False
+            watermark_score = 0.0
+            
+            if area_ratio < 0.1:
+                watermark_score += 0.3
+            
+            if y2 > img_h * 0.85 or y1 < img_h * 0.15:
+                watermark_score += 0.3
+            
+            if x2 > img_w * 0.85 or x1 < img_w * 0.15:
+                watermark_score += 0.2
+            
+            corner_dist = min(
+                (x1 ** 2 + y1 ** 2) ** 0.5,
+                (x2 ** 2 + y1 ** 2) ** 0.5,
+                (x1 ** 2 + y2 ** 2) ** 0.5,
+                (x2 ** 2 + y2 ** 2) ** 0.5
+            )
+            max_dist = (img_w ** 2 + img_h ** 2) ** 0.5
+            if corner_dist < max_dist * 0.3:
+                watermark_score += 0.3
+            
+            is_likely_watermark = watermark_score >= 0.4
+            
+            location = self._get_location_name(x1, y1, x2, y2, img_w, img_h)
+            
+            text_regions.append({
+                "text": text,
+                "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                "confidence": float(confidence),
+                "watermark_score": watermark_score,
+                "is_watermark": is_likely_watermark,
+                "location": location
+            })
+        
+        return text_regions
+    
+    def _get_florence_caption(self, img):
+        try:
+            model, processor = self._load_florence()
+            image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(image_rgb)
+            
+            task_prompt = "<MORE_DETAILED_CAPTION>"
+            inputs = processor(text=task_prompt, images=pil_image, return_tensors="pt")
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            
+            with torch.no_grad():
+                generated_ids = model.generate(
+                    input_ids=inputs["input_ids"],
+                    pixel_values=inputs["pixel_values"],
+                    max_new_tokens=256,
+                    num_beams=3,
+                    early_stopping=True
+                )
+            
+            generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            return generated_text
+        except Exception as e:
+            return f"Failed to generate caption: {str(e)}"
+    
+    def _analyze_image_for_logo(self, img):
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        img_h, img_w = gray.shape
+        
+        edges = cv2.Canny(gray, 50, 150)
+        
+        corners = [
+            (0, img_w // 4, 0, img_h // 4),
+            (img_w * 3 // 4, img_w, 0, img_h // 4),
+            (0, img_w // 4, img_h * 3 // 4, img_h),
+            (img_w * 3 // 4, img_w, img_h * 3 // 4, img_h),
+        ]
+        
+        logo_regions = []
+        
+        for x1, x2, y1, y2 in corners:
+            region = edges[y1:y2, x1:x2]
+            edge_density = np.sum(region > 0) / region.size
+            
+            if edge_density > 0.02:
+                contours, _ = cv2.findContours(region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for contour in contours:
+                    area = cv2.contourArea(contour)
+                    if area > 100:
+                        cx, cy, cw, ch = cv2.boundingRect(contour)
+                        logo_regions.append({
+                            "bbox": [int(x1 + cx), int(y1 + cy), int(x1 + cx + cw), int(y1 + cy + ch)],
+                            "location": self._get_location_name(x1 + cx, y1 + cy, x1 + cx + cw, y1 + cy + ch, img_w, img_h),
+                            "confidence": 0.6
+                        })
+        
+        return logo_regions
+    
+    def detect(self, image_path, return_caption=True):
+        result = {
+            "success": False,
+            "caption": "",
+            "watermark_info": None
+        }
+        
+        if not os.path.exists(image_path):
+            result["caption"] = f"Image file not found: {image_path}"
+            return result
+        
+        img = self._load_image(image_path)
+        if img is None:
+            result["caption"] = f"Failed to load image: {image_path}"
+            return result
+        
+        img_h, img_w = img.shape[:2]
+        
+        try:
+            text_regions = self._analyze_text_regions(img)
+        except Exception as e:
+            text_regions = []
+        
+        watermark_candidates = [r for r in text_regions if r.get("is_watermark", False)]
+        
+        if return_caption:
+            try:
+                florence_caption = self._get_florence_caption(img)
+                result["caption"] = florence_caption
+            except Exception as e:
+                result["caption"] = f"Caption generation failed: {str(e)}"
+        
+        if watermark_candidates:
+            best = max(watermark_candidates, key=lambda x: x.get("watermark_score", 0))
+            
+            result["success"] = True
+            result["watermark_info"] = {
+                "type": "text",
+                "content": best["text"],
+                "location": best["location"],
+                "position": best["bbox"],
+                "confidence": best["watermark_score"]
+            }
+            
+            if return_caption:
+                all_watermark_texts = [r["text"] for r in watermark_candidates]
+                result["caption"] = f"Detected text watermark(s): {', '.join(all_watermark_texts)}. " + result["caption"]
+            
+            return result
+        
+        try:
+            logo_regions = self._analyze_image_for_logo(img)
+            if logo_regions:
+                best_logo = max(logo_regions, key=lambda x: x.get("confidence", 0))
+                
+                result["success"] = True
+                result["watermark_info"] = {
+                    "type": "image",
+                    "content": "logo/image watermark",
+                    "location": best_logo["location"],
+                    "position": best_logo["bbox"],
+                    "confidence": best_logo["confidence"]
+                }
+                
+                if return_caption:
+                    result["caption"] = f"Detected image/logo watermark at {best_logo['location']}. " + result["caption"]
+                
+                return result
+        except Exception:
+            pass
+        
+        if text_regions:
+            all_texts = [r["text"] for r in text_regions]
+            result["success"] = True
+            result["watermark_info"] = {
+                "type": "text",
+                "content": ", ".join(all_texts[:3]),
+                "location": text_regions[0]["location"],
+                "position": text_regions[0]["bbox"],
+                "confidence": 0.5
+            }
+            
+            if return_caption:
+                result["caption"] = f"Found text in image: {', '.join(all_texts)}. " + result["caption"]
+            
+            return result
+        
+        result["success"] = False
+        result["caption"] = "No watermark detected in the image. " + result.get("caption", "")
+        result["watermark_info"] = None
+        
+        return result
+    
+    def get_caption(self, image_path):
+        img = self._load_image(image_path)
+        if img is None:
+            return {"success": False, "caption": f"Failed to load image: {image_path}"}
+        
+        try:
+            caption = self._get_florence_caption(img)
+            return {"success": True, "caption": caption}
+        except Exception as e:
+            return {"success": False, "caption": str(e)}
 
 class WatermarkRemover:
     def __init__(self, root):
@@ -1789,13 +2104,15 @@ class WatermarkRemoverCLI:
 def create_api_app():
     app = Flask(__name__)
     cli = WatermarkRemoverCLI()
+    detector = WatermarkDetector()
     
     @app.route('/', methods=['GET'])
     def index():
         return jsonify({
             "name": "水印去除工具 API",
-            "version": "1.0.0",
+            "version": "1.1.0",
             "endpoints": {
+                "/detect": "POST - 检测水印",
                 "/remove": "POST - 移除水印",
                 "/batch": "POST - 批量处理",
                 "/status": "GET - 服务状态"
@@ -1809,9 +2126,29 @@ def create_api_app():
             "device": cli.device,
             "models_loaded": {
                 "lama": cli.simple_lama is not None,
-                "ocr": cli.ocr_reader is not None
+                "ocr": cli.ocr_reader is not None,
+                "florence": detector.florence_model is not None
             }
         })
+    
+    @app.route('/detect', methods=['POST'])
+    def detect():
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({"success": False, "message": "请求体必须是JSON格式"}), 400
+        
+        image_path = data.get('image')
+        if not image_path:
+            return jsonify({"success": False, "message": "缺少 image 参数"}), 400
+        
+        if not os.path.exists(image_path):
+            return jsonify({"success": False, "message": f"图片文件不存在: {image_path}"}), 404
+        
+        return_caption = data.get('return_caption', True)
+        
+        result = detector.detect(image_path, return_caption=return_caption)
+        return jsonify(result)
     
     @app.route('/remove', methods=['POST'])
     def remove():
@@ -1918,12 +2255,19 @@ def main_api(port=8080, host='127.0.0.1'):
     print(f"地址: http://{host}:{port}")
     print(f"端点:")
     print(f"  GET  /status  - 服务状态")
+    print(f"  POST /detect  - 检测水印")
     print(f"  POST /remove  - 移除水印")
     print(f"  POST /batch   - 批量处理")
     print(f"按 Ctrl+C 停止服务")
     app.run(host=host, port=port, debug=False)
 
 def main():
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+    
     parser = argparse.ArgumentParser(
         description="水印去除工具",
         formatter_class=argparse.RawDescriptionHelpFormatter
@@ -1934,6 +2278,11 @@ def main():
     api_parser = subparsers.add_parser('api', help='启动API服务')
     api_parser.add_argument('--port', '-p', type=int, default=8080, help='API服务端口 (默认: 8080)')
     api_parser.add_argument('--host', default='127.0.0.1', help='API服务地址 (默认: 127.0.0.1)')
+    
+    detect_parser = subparsers.add_parser('detect', help='检测图片中的水印')
+    detect_parser.add_argument("--input", "-i", required=True, help="输入图片路径")
+    detect_parser.add_argument("--no-caption", action="store_true", help="不生成图片描述(更快)")
+    detect_parser.add_argument("--json", "-j", action="store_true", help="以JSON格式输出结果")
     
     cli_parser = subparsers.add_parser('cli', help='命令行模式')
     cli_parser.add_argument("--input", "-i", required=True, help="输入图片路径或目录")
@@ -1951,6 +2300,8 @@ def main():
     
     if args.command == 'api':
         main_api(port=args.port, host=args.host)
+    elif args.command == 'detect':
+        run_detect(args)
     elif args.command == 'cli':
         run_cli(args)
     else:
@@ -1961,6 +2312,29 @@ def main():
             root.mainloop()
         except ImportError:
             parser.print_help()
+
+def run_detect(args):
+    detector = WatermarkDetector()
+    result = detector.detect(args.input, return_caption=not args.no_caption)
+    
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        if result["success"]:
+            info = result.get("watermark_info", {})
+            print(f"检测到水印!")
+            print(f"  类型: {info.get('type', 'unknown')}")
+            print(f"  内容: {info.get('content', '')}")
+            print(f"  位置: {info.get('location', '')}")
+            if info.get('position'):
+                print(f"  坐标: {info.get('position')}")
+            print(f"  置信度: {info.get('confidence', 0):.2f}")
+            if result.get("caption"):
+                print(f"\n图片描述: {result['caption']}")
+        else:
+            print(f"未检测到水印")
+            if result.get("caption"):
+                print(f"图片描述: {result['caption']}")
 
 def run_cli(args):
     if args.mode == "text" and not args.text:
