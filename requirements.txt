@@ -1,0 +1,10 @@
+torch
+torchvision
+opencv-python
+pillow
+numpy
+simple-lama-inpainting
+rapidocr-onnxruntime
+transformers
+flask
+tkinterdnd2
