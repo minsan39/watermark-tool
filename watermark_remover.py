@@ -1398,7 +1398,8 @@ class WatermarkRemover:
             
             self._apply_lama_inpaint(mask)
         except Exception as e:
-            self.root.after(0, lambda: self._handle_error(str(e)))
+            error_msg = str(e)
+            self.root.after(0, lambda: self._handle_error(error_msg))
     
     def _process_text_in_background(self, watermark_text):
         try:
@@ -1442,7 +1443,8 @@ class WatermarkRemover:
             self._apply_lama_inpaint(mask)
             
         except Exception as e:
-            self.root.after(0, lambda: self._handle_error(str(e)))
+            error_msg = str(e)
+            self.root.after(0, lambda: self._handle_error(error_msg))
     
     def _process_batch_text_in_background(self, watermark_text):
         try:
@@ -1509,7 +1511,8 @@ class WatermarkRemover:
             
         except Exception as e:
             self.batch_processing = False
-            self.root.after(0, lambda: self._handle_error(str(e)))
+            error_msg = str(e)
+            self.root.after(0, lambda: self._handle_error(error_msg))
     
     def _process_batch_image_in_background(self):
         try:
@@ -1637,7 +1640,8 @@ class WatermarkRemover:
             
         except Exception as e:
             self.batch_processing = False
-            self.root.after(0, lambda: self._handle_error(str(e)))
+            error_msg = str(e)
+            self.root.after(0, lambda: self._handle_error(error_msg))
     
     def _process_batch_auto_in_background(self):
         try:
@@ -1734,7 +1738,8 @@ class WatermarkRemover:
         
         except Exception as e:
             self.batch_processing = False
-            self.root.after(0, lambda: self._handle_error(str(e)))
+            error_msg = str(e)
+            self.root.after(0, lambda: self._handle_error(error_msg))
     
     def _process_image_in_background(self):
         try:
@@ -1839,7 +1844,8 @@ class WatermarkRemover:
             self._apply_lama_inpaint(mask)
             
         except Exception as e:
-            self.root.after(0, lambda: self._handle_error(str(e)))
+            error_msg = str(e)
+            self.root.after(0, lambda: self._handle_error(error_msg))
     
     def _process_auto_in_background(self):
         try:
@@ -1871,7 +1877,8 @@ class WatermarkRemover:
                 self.root.after(0, lambda: self._handle_error(f"无法处理检测到的水印类型: {watermark_type}"))
         
         except Exception as e:
-            self.root.after(0, lambda: self._handle_error(str(e)))
+            error_msg = str(e)
+            self.root.after(0, lambda: self._handle_error(error_msg))
     
     def _auto_remove_by_text(self, watermark_text):
         try:
@@ -1912,7 +1919,8 @@ class WatermarkRemover:
             self._apply_lama_inpaint(mask)
         
         except Exception as e:
-            self.root.after(0, lambda: self._handle_error(str(e)))
+            error_msg = str(e)
+            self.root.after(0, lambda: self._handle_error(error_msg))
     
     def _auto_remove_by_box(self, position):
         try:
@@ -1934,7 +1942,8 @@ class WatermarkRemover:
             self._apply_lama_inpaint(mask)
         
         except Exception as e:
-            self.root.after(0, lambda: self._handle_error(str(e)))
+            error_msg = str(e)
+            self.root.after(0, lambda: self._handle_error(error_msg))
     
     def _apply_lama_inpaint(self, mask):
         try:
@@ -1953,7 +1962,8 @@ class WatermarkRemover:
             
             self.root.after(0, lambda: self._finish_processing(new_image))
         except Exception as e:
-            self.root.after(0, lambda: self._handle_error(str(e)))
+            error_msg = str(e)
+            self.root.after(0, lambda: self._handle_error(error_msg))
     
     def _finish_processing(self, new_image):
         self.progress_bar.stop()
