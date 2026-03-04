@@ -68,7 +68,11 @@ python watermark_remover.py api --port 8080
 **一条命令完成检测 + 去除**，无需两步操作：
 
 ```bash
+# 源码版本
 python watermark_remover.py auto -i <图片路径> --json
+
+# 打包版本（EXE）
+WatermarkTool.exe auto -i <图片路径> --json
 ```
 
 **返回结果：**
@@ -99,7 +103,11 @@ python watermark_remover.py auto -i <图片路径> --json
 
 **步骤 1：检测水印**
 ```bash
+# 源码版本
 python watermark_remover.py detect -i photo.jpg --json
+
+# 打包版本（EXE）
+WatermarkTool.exe detect -i photo.jpg --json
 ```
 
 **返回：**
@@ -119,11 +127,11 @@ python watermark_remover.py detect -i photo.jpg --json
 
 **步骤 2：根据检测结果移除**
 ```bash
-# 文字水印 - 使用 content
+# 源码版本
 python watermark_remover.py cli -i photo.jpg -m text -t "豆包AI生成"
 
-# 图像水印 - 使用 position
-python watermark_remover.py cli -i photo.jpg -m box -c "1483,2264,1723,2315"
+# 打包版本（EXE）
+WatermarkTool.exe cli -i photo.jpg -m text -t "豆包AI生成"
 ```
 
 ### AI 调用方式三：API 服务模式
@@ -131,8 +139,11 @@ python watermark_remover.py cli -i photo.jpg -m box -c "1483,2264,1723,2315"
 适合需要多次调用的场景，模型只需加载一次：
 
 ```bash
-# 启动服务
+# 源码版本
 python watermark_remover.py api --port 8080
+
+# 打包版本（EXE）
+WatermarkTool.exe api --port 8080
 ```
 
 **API 端点：**
